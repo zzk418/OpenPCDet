@@ -6,7 +6,7 @@ import os
 class WarehouseSceneGenerator:
     """库房场景点云数据生成器"""
     
-    def __init__(self, warehouse_size=(50, 40, 5)):
+    def __init__(self, warehouse_size=(20, 16, 5)):
         """
         初始化库房场景
         warehouse_size: (length, width, height) 库房尺寸
@@ -101,70 +101,70 @@ class WarehouseSceneGenerator:
     
     def generate_forklift_points(self, center, rotation_angle=0, forklift_type='standard'):
         """
-        生成叉车点云
+        生成叉车点云（放大版本，占画面约30%）
         forklift_type: 'standard'(标准叉车), 'compact'(紧凑型), 'reach'(伸缩臂)
         """
         cx, cy, cz = center
         points = []
         
         if forklift_type == 'standard':
-            # 标准叉车：车身 + 叉子
-            # 车身 (长x宽x高: 3x1.5x2)
-            body_points = self.generate_box_points((cx, cy, cz + 1), (3, 1.5, 2), density=1500)
+            # 标准叉车：车身 + 叉子（放大2倍）
+            # 车身 (长x宽x高: 6x3x2)
+            body_points = self.generate_box_points((cx, cy, cz + 1), (6, 3, 2), density=3000)
             points.extend(body_points)
             
             # 前叉 (两个平行的叉子)
-            fork_length = 1.2
-            fork_width = 0.15
-            fork_height = 0.1
+            fork_length = 2.4
+            fork_width = 0.3
+            fork_height = 0.2
             # 左叉
-            left_fork = self.generate_box_points((cx + 1.2, cy - 0.4, cz + 0.5), 
-                                                 (fork_length, fork_width, fork_height), density=800)
+            left_fork = self.generate_box_points((cx + 2.4, cy - 0.8, cz + 0.5), 
+                                                 (fork_length, fork_width, fork_height), density=1600)
             points.extend(left_fork)
             # 右叉
-            right_fork = self.generate_box_points((cx + 1.2, cy + 0.4, cz + 0.5), 
-                                                  (fork_length, fork_width, fork_height), density=800)
+            right_fork = self.generate_box_points((cx + 2.4, cy + 0.8, cz + 0.5), 
+                                                  (fork_length, fork_width, fork_height), density=1600)
             points.extend(right_fork)
             
             # 支柱
-            mast_points = self.generate_cylinder_points((cx - 0.5, cy, cz + 1.5), 0.15, 1.5, density=600)
+            mast_points = self.generate_cylinder_points((cx - 1.0, cy, cz + 1.5), 0.3, 1.5, density=1200)
             points.extend(mast_points)
             
         elif forklift_type == 'compact':
-            # 紧凑型叉车：更小的车身
-            body_points = self.generate_box_points((cx, cy, cz + 0.8), (2.5, 1.2, 1.6), density=1200)
+            # 紧凑型叉车：更小的车身（放大2倍）
+            body_points = self.generate_box_points((cx, cy, cz + 0.8), (5, 2.4, 1.6), density=2400)
             points.extend(body_points)
             
-            fork_length = 1.0
-            fork_width = 0.12
-            fork_height = 0.08
-            left_fork = self.generate_box_points((cx + 1.0, cy - 0.35, cz + 0.4), 
-                                                 (fork_length, fork_width, fork_height), density=600)
+            fork_length = 2.0
+            fork_width = 0.24
+            fork_height = 0.16
+            left_fork = self.generate_box_points((cx + 2.0, cy - 0.7, cz + 0.4), 
+                                                 (fork_length, fork_width, fork_height), density=1200)
             points.extend(left_fork)
-            right_fork = self.generate_box_points((cx + 1.0, cy + 0.35, cz + 0.4), 
-                                                  (fork_length, fork_width, fork_height), density=600)
+            right_fork = self.generate_box_points((cx + 2.0, cy + 0.7, cz + 0.4), 
+                                                  (fork_length, fork_width, fork_height), density=1200)
             points.extend(right_fork)
             
-            mast_points = self.generate_cylinder_points((cx - 0.4, cy, cz + 1.2), 0.12, 1.2, density=500)
+            mast_points = self.generate_cylinder_points((cx - 0.8, cy, cz + 1.2), 0.24, 1.2, density=1000)
             points.extend(mast_points)
             
         elif forklift_type == 'reach':
-            # 伸缩臂叉车：有伸缩机制
-            body_points = self.generate_box_points((cx, cy, cz + 1.2), (3.2, 1.6, 2.2), density=1600)
+            # 伸缩臂叉车：有伸缩机制（放大2倍）
+            body_points = self.generate_box_points((cx, cy, cz + 1.2), (6.4, 3.2, 2.2), density=3200)
             points.extend(body_points)
             
-            fork_length = 1.5
-            fork_width = 0.15
-            fork_height = 0.1
-            left_fork = self.generate_box_points((cx + 1.5, cy - 0.45, cz + 0.6), 
-                                                 (fork_length, fork_width, fork_height), density=900)
+            fork_length = 3.0
+            fork_width = 0.3
+            fork_height = 0.2
+            left_fork = self.generate_box_points((cx + 3.0, cy - 0.9, cz + 0.6), 
+                                                 (fork_length, fork_width, fork_height), density=1800)
             points.extend(left_fork)
-            right_fork = self.generate_box_points((cx + 1.5, cy + 0.45, cz + 0.6), 
-                                                  (fork_length, fork_width, fork_height), density=900)
+            right_fork = self.generate_box_points((cx + 3.0, cy + 0.9, cz + 0.6), 
+                                                  (fork_length, fork_width, fork_height), density=1800)
             points.extend(right_fork)
             
             # 更长的支柱
-            mast_points = self.generate_cylinder_points((cx - 0.6, cy, cz + 1.8), 0.18, 2.0, density=700)
+            mast_points = self.generate_cylinder_points((cx - 1.2, cy, cz + 1.8), 0.36, 2.0, density=1400)
             points.extend(mast_points)
         
         # 应用旋转
@@ -180,39 +180,39 @@ class WarehouseSceneGenerator:
     
     def generate_shelf_points(self, center, shelf_type='small'):
         """
-        生成货架点云
-        shelf_type: 'small'(1m), 'medium'(2m), 'large'(3m)
+        生成货架点云（放大版本，占画面约30%）
+        shelf_type: 'small'(1m), 'medium'(2m), 'large'(2m)
         """
         cx, cy, cz = center
         points = []
         
         if shelf_type == 'small':
-            # 小货架：1m高
+            # 小货架：1m高（放大2倍）
             height = 1.0
-            width = 1.2
-            depth = 0.6
+            width = 3.0
+            depth = 1.6
         elif shelf_type == 'medium':
-            # 中型货架：2m高
+            # 中型货架：2m高（放大2倍）
             height = 2.0
-            width = 1.5
-            depth = 0.8
+            width = 3.0
+            depth = 1.6
         else:  # large
-            # 大型货架：3m高
-            height = 3.0
-            width = 1.5
-            depth = 0.8
+            # 大型货架：2m高（放大2倍）
+            height = 2.0
+            width = 3.0
+            depth = 1.6
         
         # 四个支柱
-        pillar_radius = 0.08
+        pillar_radius = 0.16
         pillar_positions = [
-            (cx - width/2 + 0.1, cy - depth/2 + 0.1),
-            (cx + width/2 - 0.1, cy - depth/2 + 0.1),
-            (cx - width/2 + 0.1, cy + depth/2 - 0.1),
-            (cx + width/2 - 0.1, cy + depth/2 - 0.1),
+            (cx - width/2 + 0.2, cy - depth/2 + 0.2),
+            (cx + width/2 - 0.2, cy - depth/2 + 0.2),
+            (cx - width/2 + 0.2, cy + depth/2 - 0.2),
+            (cx + width/2 - 0.2, cy + depth/2 - 0.2),
         ]
         
         for px, py in pillar_positions:
-            pillar = self.generate_cylinder_points((px, py, cz + height/2), pillar_radius, height, density=400)
+            pillar = self.generate_cylinder_points((px, py, cz + height/2), pillar_radius, height, density=800)
             points.extend(pillar)
         
         # 横梁（多层）
@@ -220,37 +220,37 @@ class WarehouseSceneGenerator:
         for i in range(num_shelves):
             z = cz + i * 0.5
             # 前后横梁
-            for y_offset in [-depth/2 + 0.1, depth/2 - 0.1]:
+            for y_offset in [-depth/2 + 0.2, depth/2 - 0.2]:
                 beam = self.generate_box_points((cx, cy + y_offset, z), 
-                                               (width - 0.2, 0.1, 0.08), density=300)
+                                               (width - 0.4, 0.2, 0.16), density=600)
                 points.extend(beam)
             # 左右横梁
-            for x_offset in [-width/2 + 0.1, width/2 - 0.1]:
+            for x_offset in [-width/2 + 0.2, width/2 - 0.2]:
                 beam = self.generate_box_points((cx + x_offset, cy, z), 
-                                               (0.1, depth - 0.2, 0.08), density=300)
+                                               (0.2, depth - 0.4, 0.16), density=600)
                 points.extend(beam)
         
         return np.array(points)
     
     def generate_workbench_points(self, center):
-        """生成工作台点云（1m高）"""
+        """生成工作台点云（1m高，放大版本）"""
         cx, cy, cz = center
         points = []
         
-        # 工作台面 (1.5m x 0.8m x 0.05m)
-        tabletop = self.generate_box_points((cx, cy, cz + 0.95), (1.5, 0.8, 0.05), density=800)
+        # 工作台面 (3m x 1.6m x 0.1m)
+        tabletop = self.generate_box_points((cx, cy, cz + 0.95), (3.0, 1.6, 0.1), density=1600)
         points.extend(tabletop)
         
-        # 四个腿 (0.1m x 0.1m x 0.95m)
+        # 四个腿 (0.2m x 0.2m x 0.95m)
         leg_positions = [
-            (cx - 0.7, cy - 0.35),
-            (cx + 0.7, cy - 0.35),
-            (cx - 0.7, cy + 0.35),
-            (cx + 0.7, cy + 0.35),
+            (cx - 1.4, cy - 0.7),
+            (cx + 1.4, cy - 0.7),
+            (cx - 1.4, cy + 0.7),
+            (cx + 1.4, cy + 0.7),
         ]
         
         for lx, ly in leg_positions:
-            leg = self.generate_box_points((lx, ly, cz + 0.475), (0.1, 0.1, 0.95), density=400)
+            leg = self.generate_box_points((lx, ly, cz + 0.475), (0.2, 0.2, 0.95), density=800)
             points.extend(leg)
         
         return np.array(points)
@@ -265,11 +265,9 @@ class WarehouseSceneGenerator:
     def generate_complete_scene(self):
         """生成完整的库房场景"""
         
-        # 1. 地面
-        ground = self.generate_ground_points(density=8000)
-        self.add_points(ground, [0.5, 0.5, 0.5])  # 灰色
+        # 注意：不生成地面点云，只生成物体和墙
         
-        # 2. 四面墙
+        # 1. 四面墙 - 纯黑色
         wall_thickness = 0.2
         wall_height = self.height
         
@@ -278,74 +276,66 @@ class WarehouseSceneGenerator:
             (-self.length/2, self.length/2),
             (-self.width/2, -self.width/2 + wall_thickness),
             (0, wall_height),
-            density=3000
+            density=5000
         )
-        self.add_points(front_wall, [0.7, 0.7, 0.7])  # 浅灰色
+        self.add_points(front_wall, [0.0, 0.0, 0.0])  # 纯黑色
         
         # 后墙
         back_wall = self.generate_wall_points(
             (-self.length/2, self.length/2),
             (self.width/2 - wall_thickness, self.width/2),
             (0, wall_height),
-            density=3000
+            density=5000
         )
-        self.add_points(back_wall, [0.7, 0.7, 0.7])
+        self.add_points(back_wall, [0.0, 0.0, 0.0])  # 纯黑色
         
         # 左墙
         left_wall = self.generate_wall_points(
             (-self.length/2, -self.length/2 + wall_thickness),
             (-self.width/2, self.width/2),
             (0, wall_height),
-            density=3000
+            density=5000
         )
-        self.add_points(left_wall, [0.7, 0.7, 0.7])
+        self.add_points(left_wall, [0.0, 0.0, 0.0])  # 纯黑色
         
         # 右墙
         right_wall = self.generate_wall_points(
             (self.length/2 - wall_thickness, self.length/2),
             (-self.width/2, self.width/2),
             (0, wall_height),
-            density=3000
+            density=5000
         )
-        self.add_points(right_wall, [0.7, 0.7, 0.7])
+        self.add_points(right_wall, [0.0, 0.0, 0.0])  # 纯黑色
         
-        # 3. 两个工作台（1m高）
-        workbench1 = self.generate_workbench_points((-15, -12, 0))
-        self.add_points(workbench1, [0.8, 0.6, 0.4])  # 棕色
+        # 2. 两个工作台（1m高）- 纯黑色
+        workbench1 = self.generate_workbench_points((-7, -6, 0))
+        self.add_points(workbench1, [0.0, 0.0, 0.0])  # 纯黑色
         
-        workbench2 = self.generate_workbench_points((15, 12, 0))
-        self.add_points(workbench2, [0.8, 0.6, 0.4])
+        workbench2 = self.generate_workbench_points((7, 6, 0))
+        self.add_points(workbench2, [0.0, 0.0, 0.0])  # 纯黑色
         
-        # 4. 两个中型货架（2m高）
-        shelf_medium1 = self.generate_shelf_points((-10, 0, 0), shelf_type='medium')
-        self.add_points(shelf_medium1, [0.6, 0.6, 0.6])  # 深灰色
+        # 3. 两个中型货架（2m高）- 纯黑色
+        shelf_medium1 = self.generate_shelf_points((-4, 0, 0), shelf_type='medium')
+        self.add_points(shelf_medium1, [0.0, 0.0, 0.0])  # 纯黑色
         
-        shelf_medium2 = self.generate_shelf_points((10, 0, 0), shelf_type='medium')
-        self.add_points(shelf_medium2, [0.6, 0.6, 0.6])
+        shelf_medium2 = self.generate_shelf_points((4, 0, 0), shelf_type='medium')
+        self.add_points(shelf_medium2, [0.0, 0.0, 0.0])  # 纯黑色
         
-        # 5. 两个大型货架（3m高，由两个中型货架拼起来）
-        shelf_large1 = self.generate_shelf_points((-5, -15, 0), shelf_type='large')
-        self.add_points(shelf_large1, [0.5, 0.5, 0.5])  # 更深的灰色
+        # 4. 两个大型货架（2m高）- 纯黑色
+        shelf_large1 = self.generate_shelf_points((-2, -6, 0), shelf_type='large')
+        self.add_points(shelf_large1, [0.0, 0.0, 0.0])  # 纯黑色
         
-        shelf_large2 = self.generate_shelf_points((5, 15, 0), shelf_type='large')
-        self.add_points(shelf_large2, [0.5, 0.5, 0.5])
+        shelf_large2 = self.generate_shelf_points((2, 6, 0), shelf_type='large')
+        self.add_points(shelf_large2, [0.0, 0.0, 0.0])  # 纯黑色
         
-        # 6. 多种叉车
+        # 5. 两个叉车（放大尺寸）- 纯黑色
         # 标准叉车
-        forklift_standard = self.generate_forklift_points((-20, -8, 0), rotation_angle=0, forklift_type='standard')
-        self.add_points(forklift_standard, [1.0, 0.0, 0.0])  # 红色
+        forklift_standard = self.generate_forklift_points((-7, 5, 0), rotation_angle=0, forklift_type='standard')
+        self.add_points(forklift_standard, [0.0, 0.0, 0.0])  # 纯黑色
         
         # 紧凑型叉车
-        forklift_compact = self.generate_forklift_points((20, 8, 0), rotation_angle=45, forklift_type='compact')
-        self.add_points(forklift_compact, [0.0, 1.0, 0.0])  # 绿色
-        
-        # 伸缩臂叉车
-        forklift_reach = self.generate_forklift_points((0, -18, 0), rotation_angle=90, forklift_type='reach')
-        self.add_points(forklift_reach, [0.0, 0.0, 1.0])  # 蓝色
-        
-        # 另一个标准叉车
-        forklift_standard2 = self.generate_forklift_points((0, 18, 0), rotation_angle=180, forklift_type='standard')
-        self.add_points(forklift_standard2, [1.0, 1.0, 0.0])  # 黄色
+        forklift_compact = self.generate_forklift_points((7, -5, 0), rotation_angle=45, forklift_type='compact')
+        self.add_points(forklift_compact, [0.0, 0.0, 0.0])  # 纯黑色
     
     def save_as_ply(self, filename):
         """保存为PLY格式"""
@@ -397,7 +387,7 @@ if __name__ == '__main__':
     os.makedirs(output_dir, exist_ok=True)
     
     # 创建库房场景生成器
-    generator = WarehouseSceneGenerator(warehouse_size=(50, 40, 5))
+    generator = WarehouseSceneGenerator(warehouse_size=(20, 16, 5))
     
     # 生成完整场景
     generator.generate_complete_scene()
@@ -410,9 +400,13 @@ if __name__ == '__main__':
     
     print("\n库房场景生成完成！")
     print("包含内容：")
-    print("- 库房四周的墙体")
-    print("- 2个工作台（1m高）")
-    print("- 2个中型货架（2m高）")
-    print("- 2个大型货架（3m高）")
-    print("- 4种不同类型的叉车（标准、紧凑、伸缩臂）")
+    print("- 库房尺寸：20m x 16m x 5m")
+    print("- 库房四周的墙体（纯黑色）")
+    print("- 2个工作台（1m高，放大版本）")
+    print("- 2个中型货架（2m高，放大版本）")
+    print("- 2个大型货架（2m高，放大版本）")
+    print("- 2个叉车（放大版本，占画面约30%）")
+    print("- 所有物体和墙体均为纯黑色")
+    print("- 不包含地面点云")
+    print("- 所有物体均在墙内，分散分布，无碰撞")
     print(f"\n数据已保存到: {output_dir}")
