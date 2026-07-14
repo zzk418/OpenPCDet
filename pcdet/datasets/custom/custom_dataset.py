@@ -124,8 +124,10 @@ class CustomDataset(DatasetTemplate):
                 info_with_fakelidar=self.dataset_cfg.get('INFO_WITH_FAKELIDAR', False)
             )
             kitti_class_names = [map_name_to_kitti[x] for x in class_names]
+            # Use custom class names directly (no KITTI mapping needed)
             ap_result_str, ap_dict = kitti_eval.get_official_eval_result(
-                gt_annos=eval_gt_annos, dt_annos=eval_det_annos, current_classes=kitti_class_names
+                gt_annos=eval_gt_annos, dt_annos=eval_det_annos, current_classes=class_names,
+                class_names=class_names
             )
             return ap_result_str, ap_dict
 

@@ -27,13 +27,25 @@ def get_thresholds(scores: np.ndarray, num_gt, num_sample_pts=41):
     return thresholds
 
 
-def clean_data(gt_anno, dt_anno, current_class, difficulty):
-    CLASS_NAMES = ['car', 'pedestrian', 'cyclist', 'van', 'person_sitting', 'truck']
+def clean_data(gt_anno, dt_anno, current_class, difficulty, class_names=None):
+    """
+    Args:
+        gt_anno: ground truth annotation dict
+        dt_anno: detection annotation dict
+        current_class: int index into class_names, or str class name if class_names is None
+        difficulty: 0=easy, 1=moderate, 2=hard
+        class_names: list of class name strings. If None, uses KITTI defaults.
+    """
+    if class_names is None:
+        CLASS_NAMES = ['car', 'pedestrian', 'cyclist', 'van', 'person_sitting', 'truck']
+    else:
+        CLASS_NAMES = [c.lower() for c in class_names]
+
     MIN_HEIGHT = [40, 25, 25]
     MAX_OCCLUSION = [0, 1, 2]
     MAX_TRUNCATION = [0.15, 0.3, 0.5]
     dc_bboxes, ignored_gt, ignored_dt = [], [], []
-    current_cls_name = CLASS_NAMES[current_class].lower()
+    current_cls_name = CLASS_NAMES[current_class].lower() if isinstance(current_class, int) else current_class.lower()
     num_gt = len(gt_anno["name"])
     num_dt = len(dt_anno["name"])
     num_valid_gt = 0
@@ -44,11 +56,15 @@ def clean_data(gt_anno, dt_anno, current_class, difficulty):
         valid_class = -1
         if (gt_name == current_cls_name):
             valid_class = 1
-        elif (current_cls_name == "Pedestrian".lower()
-              and "Person_sitting".lower() == gt_name):
-            valid_class = 0
-        elif (current_cls_name == "Car".lower() and "Van".lower() == gt_name):
-            valid_class = 0
+        elif class_names is None:
+            # KITTI-specific merging logic (only when no custom class_names)
+            if (current_cls_name == "pedestrian"
+                  and "person_sitting" == gt_name):
+                valid_class = 0
+            elif (current_cls_name == "car" and "van" == gt_name):
+                valid_class = 0
+            else:
+                valid_class = -1
         else:
             valid_class = -1
         ignore = False
@@ -414,14 +430,14 @@ def calculate_iou_partly(gt_annos, dt_annos, metric, num_parts=50):
     return overlaps, parted_overlaps, total_gt_num, total_dt_num
 
 
-def _prepare_data(gt_annos, dt_annos, current_class, difficulty):
+def _prepare_data(gt_annos, dt_annos, current_class, difficulty, class_names=None):
     gt_datas_list = []
     dt_datas_list = []
     total_dc_num = []
     ignored_gts, ignored_dets, dontcares = [], [], []
     total_num_valid_gt = 0
     for i in range(len(gt_annos)):
-        rets = clean_data(gt_annos[i], dt_annos[i], current_class, difficulty)
+        rets = clean_data(gt_annos[i], dt_annos[i], current_class, difficulty, class_names)
         num_valid_gt, ignored_gt, ignored_det, dc_bboxes = rets
         ignored_gts.append(np.array(ignored_gt, dtype=np.int64))
         ignored_dets.append(np.array(ignored_det, dtype=np.int64))
@@ -452,7 +468,8 @@ def eval_class(gt_annos,
                metric,
                min_overlaps,
                compute_aos=False,
-               num_parts=100):
+               num_parts=100,
+               class_names=None):
     """Kitti eval. support 2d/bev/3d/aos eval. support 0.5:0.05:0.95 coco AP.
     Args:
         gt_annos: dict, must from get_label_annos() in kitti_common.py
@@ -462,6 +479,7 @@ def eval_class(gt_annos,
         metric: eval type. 0: bbox, 1: bev, 2: 3d
         min_overlaps: float, min overlap. format: [num_overlap, metric, class].
         num_parts: int. a parameter for fast calculate algorithm
+        class_names: list of class name strings for custom datasets.
 
     Returns:
         dict of recall, precision and aos
@@ -483,7 +501,7 @@ def eval_class(gt_annos,
     aos = np.zeros([num_class, num_difficulty, num_minoverlap, N_SAMPLE_PTS])
     for m, current_class in enumerate(current_classes):
         for l, difficulty in enumerate(difficultys):
-            rets = _prepare_data(gt_annos, dt_annos, current_class, difficulty)
+            rets = _prepare_data(gt_annos, dt_annos, current_class, difficulty, class_names)
             (gt_datas_list, dt_datas_list, ignored_gts, ignored_dets,
              dontcares, total_dc_num, total_num_valid_gt) = rets
             for k, min_overlap in enumerate(min_overlaps[:, metric, m]):
@@ -581,11 +599,12 @@ def do_eval(gt_annos,
             current_classes,
             min_overlaps,
             compute_aos=False,
-            PR_detail_dict=None):
+            PR_detail_dict=None,
+            class_names=None):
     # min_overlaps: [num_minoverlap, metric, num_class]
     difficultys = [0, 1, 2]
     ret = eval_class(gt_annos, dt_annos, current_classes, difficultys, 0,
-                     min_overlaps, compute_aos)
+                     min_overlaps, compute_aos, class_names=class_names)
     # ret: [num_class, num_diff, num_minoverlap, num_sample_points]
     mAP_bbox = get_mAP(ret["precision"])
     mAP_bbox_R40 = get_mAP_R40(ret["precision"])
@@ -602,7 +621,7 @@ def do_eval(gt_annos,
             PR_detail_dict['aos'] = ret['orientation']
 
     ret = eval_class(gt_annos, dt_annos, current_classes, difficultys, 1,
-                     min_overlaps)
+                     min_overlaps, class_names=class_names)
     mAP_bev = get_mAP(ret["precision"])
     mAP_bev_R40 = get_mAP_R40(ret["precision"])
 
@@ -610,7 +629,7 @@ def do_eval(gt_annos,
         PR_detail_dict['bev'] = ret['precision']
 
     ret = eval_class(gt_annos, dt_annos, current_classes, difficultys, 2,
-                     min_overlaps)
+                     min_overlaps, class_names=class_names)
     mAP_3d = get_mAP(ret["precision"])
     mAP_3d_R40 = get_mAP_R40(ret["precision"])
     if PR_detail_dict is not None:
@@ -636,33 +655,69 @@ def do_coco_style_eval(gt_annos, dt_annos, current_classes, overlap_ranges,
     return mAP_bbox, mAP_bev, mAP_3d, mAP_aos
 
 
-def get_official_eval_result(gt_annos, dt_annos, current_classes, PR_detail_dict=None):
-    overlap_0_7 = np.array([[0.7, 0.5, 0.5, 0.7,
-                             0.5, 0.7], [0.7, 0.5, 0.5, 0.7, 0.5, 0.7],
-                            [0.7, 0.5, 0.5, 0.7, 0.5, 0.7]])
-    overlap_0_5 = np.array([[0.7, 0.5, 0.5, 0.7,
-                             0.5, 0.5], [0.5, 0.25, 0.25, 0.5, 0.25, 0.5],
-                            [0.5, 0.25, 0.25, 0.5, 0.25, 0.5]])
-    min_overlaps = np.stack([overlap_0_7, overlap_0_5], axis=0)  # [2, 3, 5]
-    class_to_name = {
-        0: 'Car',
-        1: 'Pedestrian',
-        2: 'Cyclist',
-        3: 'Van',
-        4: 'Person_sitting',
-        5: 'Truck'
-    }
-    name_to_class = {v: n for n, v in class_to_name.items()}
-    if not isinstance(current_classes, (list, tuple)):
-        current_classes = [current_classes]
-    current_classes_int = []
-    for curcls in current_classes:
-        if isinstance(curcls, str):
-            current_classes_int.append(name_to_class[curcls])
-        else:
-            current_classes_int.append(curcls)
-    current_classes = current_classes_int
-    min_overlaps = min_overlaps[:, :, current_classes]
+def get_official_eval_result(gt_annos, dt_annos, current_classes, PR_detail_dict=None, class_names=None):
+    """KITTI official eval. Supports both KITTI classes and custom class names.
+
+    Args:
+        gt_annos: ground truth annotations
+        dt_annos: detection annotations
+        current_classes: list of class names (strings) or class indices (ints)
+        PR_detail_dict: optional dict to store PR details
+        class_names: list of custom class name strings. If provided, current_classes
+                     are treated as integer indices into these names.
+    """
+    if class_names is not None:
+        # Custom classes mode: use provided class names, default IoU thresholds
+        num_custom = len(class_names)
+        class_to_name = {i: name for i, name in enumerate(class_names)}
+        name_to_class = {v: n for n, v in class_to_name.items()}
+
+        if not isinstance(current_classes, (list, tuple)):
+            current_classes = [current_classes]
+        current_classes_int = []
+        for curcls in current_classes:
+            if isinstance(curcls, str):
+                current_classes_int.append(name_to_class[curcls])
+            else:
+                current_classes_int.append(curcls)
+        current_classes = current_classes_int
+
+        # Default IoU thresholds: 3D=0.7/0.5, BEV=0.5/0.25 for all custom classes
+        overlap_0_7 = np.full((3, num_custom), 0.7)
+        overlap_0_7[1, :] = 0.5  # BEV
+        overlap_0_5 = np.full((3, num_custom), 0.5)
+        overlap_0_5[1, :] = 0.25  # BEV
+        min_overlaps = np.stack([overlap_0_7, overlap_0_5], axis=0)
+        min_overlaps = min_overlaps[:, :, current_classes]
+    else:
+        # Original KITTI mode
+        overlap_0_7 = np.array([[0.7, 0.5, 0.5, 0.7,
+                                 0.5, 0.7], [0.7, 0.5, 0.5, 0.7, 0.5, 0.7],
+                                [0.7, 0.5, 0.5, 0.7, 0.5, 0.7]])
+        overlap_0_5 = np.array([[0.7, 0.5, 0.5, 0.7,
+                                 0.5, 0.5], [0.5, 0.25, 0.25, 0.5, 0.25, 0.5],
+                                [0.5, 0.25, 0.25, 0.5, 0.25, 0.5]])
+        min_overlaps = np.stack([overlap_0_7, overlap_0_5], axis=0)  # [2, 3, 5]
+        class_to_name = {
+            0: 'Car',
+            1: 'Pedestrian',
+            2: 'Cyclist',
+            3: 'Van',
+            4: 'Person_sitting',
+            5: 'Truck'
+        }
+        name_to_class = {v: n for n, v in class_to_name.items()}
+        if not isinstance(current_classes, (list, tuple)):
+            current_classes = [current_classes]
+        current_classes_int = []
+        for curcls in current_classes:
+            if isinstance(curcls, str):
+                current_classes_int.append(name_to_class[curcls])
+            else:
+                current_classes_int.append(curcls)
+        current_classes = current_classes_int
+        min_overlaps = min_overlaps[:, :, current_classes]
+
     result = ''
     # check whether alpha is valid
     compute_aos = False
@@ -672,7 +727,8 @@ def get_official_eval_result(gt_annos, dt_annos, current_classes, PR_detail_dict
                 compute_aos = True
             break
     mAPbbox, mAPbev, mAP3d, mAPaos, mAPbbox_R40, mAPbev_R40, mAP3d_R40, mAPaos_R40 = do_eval(
-        gt_annos, dt_annos, current_classes, min_overlaps, compute_aos, PR_detail_dict=PR_detail_dict)
+        gt_annos, dt_annos, current_classes, min_overlaps, compute_aos, PR_detail_dict=PR_detail_dict,
+        class_names=class_names)
 
     ret_dict = {}
     for j, curcls in enumerate(current_classes):
