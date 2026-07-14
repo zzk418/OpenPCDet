@@ -1,5 +1,6 @@
 demo_data
 warehouse_data
+*.docx
 
 **__pycache__**
 **build**

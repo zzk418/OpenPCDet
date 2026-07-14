@@ -1,5 +1,5 @@
 DATASET: 'CustomDataset'
-DATA_PATH: '../data/warehouse'
+DATA_PATH: '../data/warehouse_s'
 
 POINT_CLOUD_RANGE: [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
 

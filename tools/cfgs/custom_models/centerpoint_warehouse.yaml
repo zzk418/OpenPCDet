@@ -1,0 +1,140 @@
+CLASS_NAMES:
+- 箱子
+- 电动运输车
+- 货运自行车
+- 无人搬运车
+- 叉车
+DATA_CONFIG:
+  DATA_AUGMENTOR:
+    AUG_CONFIG_LIST:
+    - ALONG_AXIS_LIST:
+      - x
+      - y
+      NAME: random_world_flip
+    - NAME: random_world_rotation
+      WORLD_ROT_ANGLE:
+      - -0.78539816
+      - 0.78539816
+    - NAME: random_world_scaling
+      WORLD_SCALE_RANGE:
+      - 0.95
+      - 1.05
+    DISABLE_AUG_LIST:
+    - placeholder
+  _BASE_CONFIG_: cfgs/dataset_configs/warehouse_dataset.yaml
+MODEL:
+  BACKBONE_2D:
+    LAYER_NUMS:
+    - 5
+    - 5
+    LAYER_STRIDES:
+    - 1
+    - 2
+    NAME: BaseBEVBackbone
+    NUM_FILTERS:
+    - 128
+    - 256
+    NUM_UPSAMPLE_FILTERS:
+    - 256
+    - 256
+    UPSAMPLE_STRIDES:
+    - 1
+    - 2
+  BACKBONE_3D:
+    NAME: VoxelResBackBone8x
+  DENSE_HEAD:
+    CLASS_AGNOSTIC: false
+    CLASS_NAMES_EACH_HEAD:
+    - - 箱子
+    - - 电动运输车
+    - - 货运自行车
+    - - 无人搬运车
+    - - 叉车
+    LOSS_CONFIG:
+      LOSS_WEIGHTS:
+        cls_weight: 1.0
+        code_weights:
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
+        - 1.0
+        loc_weight: 0.25
+    NAME: CenterHead
+    NUM_HM_CONV: 2
+    POST_PROCESSING:
+      MAX_OBJ_PER_SAMPLE: 500
+      NMS_CONFIG:
+        NMS_POST_MAXSIZE: 83
+        NMS_PRE_MAXSIZE: 1000
+        NMS_THRESH: 0.2
+        NMS_TYPE: nms_gpu
+      POST_CENTER_LIMIT_RANGE:
+      - -51.2
+      - -51.2
+      - -5.0
+      - 51.2
+      - 51.2
+      - 3.0
+      SCORE_THRESH: 0.1
+    SEPARATE_HEAD_CFG:
+      HEAD_DICT:
+        center:
+          num_conv: 2
+          out_channels: 2
+        center_z:
+          num_conv: 2
+          out_channels: 1
+        dim:
+          num_conv: 2
+          out_channels: 3
+        rot:
+          num_conv: 2
+          out_channels: 2
+      HEAD_ORDER:
+      - center
+      - center_z
+      - dim
+      - rot
+    SHARED_CONV_CHANNEL: 64
+    TARGET_ASSIGNER_CONFIG:
+      FEATURE_MAP_STRIDE: 8
+      GAUSSIAN_OVERLAP: 0.1
+      MIN_RADIUS: 2
+      NUM_MAX_OBJS: 500
+    USE_BIAS_BEFORE_NORM: true
+  MAP_TO_BEV:
+    NAME: HeightCompression
+    NUM_BEV_FEATURES: 256
+  NAME: CenterPoint
+  POST_PROCESSING:
+    EVAL_METRIC: kitti
+    RECALL_THRESH_LIST:
+    - 0.3
+    - 0.5
+    - 0.7
+  VFE:
+    NAME: MeanVFE
+OPTIMIZATION:
+  BATCH_SIZE_PER_GPU: 4
+  DECAY_STEP_LIST:
+  - 20
+  - 25
+  DIV_FACTOR: 10
+  GRAD_NORM_CLIP: 10
+  LR: 0.003
+  LR_CLIP: 1.0e-07
+  LR_DECAY: 0.1
+  LR_WARMUP: false
+  MOMENTUM: 0.9
+  MOMS:
+  - 0.95
+  - 0.85
+  NUM_EPOCHS: 30
+  OPTIMIZER: adam_onecycle
+  PCT_START: 0.4
+  WARMUP_EPOCH: 1
+  WEIGHT_DECAY: 0.01
