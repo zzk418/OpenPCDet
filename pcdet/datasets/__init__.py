@@ -12,7 +12,10 @@ from .waymo.waymo_dataset import WaymoDataset
 from .pandaset.pandaset_dataset import PandasetDataset
 from .lyft.lyft_dataset import LyftDataset
 from .once.once_dataset import ONCEDataset
-from .argo2.argo2_dataset import Argo2Dataset
+try:
+    from .argo2.argo2_dataset import Argo2Dataset
+except Exception:
+    Argo2Dataset = None
 from .custom.custom_dataset import CustomDataset
 
 __all__ = {

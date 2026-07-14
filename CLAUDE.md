@@ -209,6 +209,42 @@ python tools/demo.py \
 python tools/test.py --cfg_file tools/cfgs/kitti_models/pv_rcnn.yaml
 ```
 
+## 推理测试输出格式
+
+### KITTI 数据推理测试
+
+对 `demo_data/demo_kitti/kitti_000008.bin` 进行推理测试，输出格式如下：
+
+```bash
+python test_pv_rcnn_warehouse.py --data_path demo_data/demo_kitti --output_dir output
+```
+
+**输出文件**：
+- `output/top_view_000000.png` - 俯视图可视化（包含点云和检测框）
+- `output/segmented_points_000000.ply` - 分割后的点云文件（按检测框着色）
+
+**输出格式说明**：
+1. **PNG 文件**：俯视图（XY 平面）
+   - 点云用颜色表示强度值（viridis 色图）
+   - 检测框用红色矩形表示
+   - 标注类别名称和置信度
+
+2. **PLY 文件**：分割后的点云
+   - 格式：ASCII PLY
+   - 属性：x, y, z, red, green, blue
+   - 检测框内的点按不同颜色着色
+   - 框外的点为灰色
+
+### 数据转换流程
+
+```bash
+# 1. 将 KITTI .bin 文件转换为 PLY
+python -c "from convert_to_ply import convert_file; convert_file('demo_data/demo_kitti/kitti_000008.bin')"
+
+# 2. 对转换后的 PLY 进行推理测试
+python test_pv_rcnn_warehouse.py --data_path demo_data/demo_kitti --output_dir output
+```
+
 ## 参考资源
 
 - [OpenPCDet GitHub](https://github.com/open-mmlab/OpenPCDet)
@@ -220,3 +256,4 @@ python tools/test.py --cfg_file tools/cfgs/kitti_models/pv_rcnn.yaml
 
 - 创建日期: 2026-07-13
 - 最后更新: 2026-07-13
+- 推理测试输出格式记录: 2026-07-13

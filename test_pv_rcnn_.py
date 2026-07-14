@@ -112,17 +112,17 @@ def generate_predictions(points):
 
 def visualize_and_save(points, pred_boxes, pred_scores, pred_labels, class_names, output_dir, frame_id):
     """
-    可视化点云和检测结果，保存为图像
+    可视化点云和检测结果，只保存俯视图
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 创建 3D 图
-    fig = plt.figure(figsize=(15, 5))
-
-    # 第一个子图：俯视图（XY 平面）
-    ax1 = fig.add_subplot(131)
-    ax1.scatter(points[:, 0], points[:, 1], c=points[:, 3], cmap='viridis', s=1, alpha=0.5)
+    # 创建俯视图
+    fig = plt.figure(figsize=(10, 10))
+    ax = fig.add_subplot(111)
+    
+    # 绘制点云
+    ax.scatter(points[:, 0], points[:, 1], c=points[:, 3], cmap='viridis', s=1, alpha=0.5)
 
     # 绘制检测框（俯视图）
     if len(pred_boxes) > 0:
@@ -132,78 +132,84 @@ def visualize_and_save(points, pred_boxes, pred_scores, pred_labels, class_names
                 # 计算框的四个角
                 corners_x = [x - dx/2, x + dx/2, x + dx/2, x - dx/2, x - dx/2]
                 corners_y = [y - dy/2, y - dy/2, y + dy/2, y + dy/2, y - dy/2]
-                ax1.plot(corners_x, corners_y, 'r-', linewidth=2)
-                ax1.text(x, y, f"{class_names[int(pred_labels[i])]}\n{pred_scores[i]:.2f}",
-                        fontsize=8, ha='center')
+                ax.plot(corners_x, corners_y, 'r-', linewidth=2)
+                ax.text(x, y, f"{class_names[int(pred_labels[i])]}\n{pred_scores[i]:.2f}",
+                        fontsize=10, ha='center', color='red', weight='bold')
 
-    ax1.set_xlabel('X (m)')
-    ax1.set_ylabel('Y (m)')
-    ax1.set_title('Top View (XY Plane)')
-    ax1.grid(True, alpha=0.3)
-    ax1.axis('equal')
-
-    # 第二个子图：侧视图（XZ 平面）
-    ax2 = fig.add_subplot(132)
-    ax2.scatter(points[:, 0], points[:, 2], c=points[:, 3], cmap='viridis', s=1, alpha=0.5)
-
-    # 绘制检测框（侧视图）
-    if len(pred_boxes) > 0:
-        for i, box in enumerate(pred_boxes):
-            if pred_scores[i] > 0.3:
-                x, y, z, dx, dy, dz, heading = box
-                corners_x = [x - dx/2, x + dx/2, x + dx/2, x - dx/2, x - dx/2]
-                corners_z = [z - dz/2, z - dz/2, z + dz/2, z + dz/2, z - dz/2]
-                ax2.plot(corners_x, corners_z, 'r-', linewidth=2)
-
-    ax2.set_xlabel('X (m)')
-    ax2.set_ylabel('Z (m)')
-    ax2.set_title('Side View (XZ Plane)')
-    ax2.grid(True, alpha=0.3)
-    ax2.axis('equal')
-
-    # 第三个子图：3D 视图
-    ax3 = fig.add_subplot(133, projection='3d')
-    ax3.scatter(points[:, 0], points[:, 1], points[:, 2], c=points[:, 3], cmap='viridis', s=1, alpha=0.5)
-
-    # 绘制检测框（3D）
-    if len(pred_boxes) > 0:
-        for i, box in enumerate(pred_boxes):
-            if pred_scores[i] > 0.3:
-                x, y, z, dx, dy, dz, heading = box
-                # 绘制立方体的边
-                corners = np.array([
-                    [x - dx/2, y - dy/2, z - dz/2],
-                    [x + dx/2, y - dy/2, z - dz/2],
-                    [x + dx/2, y + dy/2, z - dz/2],
-                    [x - dx/2, y + dy/2, z - dz/2],
-                    [x - dx/2, y - dy/2, z + dz/2],
-                    [x + dx/2, y - dy/2, z + dz/2],
-                    [x + dx/2, y + dy/2, z + dz/2],
-                    [x - dx/2, y + dy/2, z + dz/2],
-                ])
-
-                # 绘制立方体的边
-                edges = [
-                    [0, 1], [1, 2], [2, 3], [3, 0],  # 底面
-                    [4, 5], [5, 6], [6, 7], [7, 4],  # 顶面
-                    [0, 4], [1, 5], [2, 6], [3, 7]   # 竖边
-                ]
-
-                for edge in edges:
-                    points_edge = corners[edge]
-                    ax3.plot3D(*points_edge.T, 'r-', linewidth=2)
-
-    ax3.set_xlabel('X (m)')
-    ax3.set_ylabel('Y (m)')
-    ax3.set_zlabel('Z (m)')
-    ax3.set_title('3D View')
+    ax.set_xlabel('X (m)', fontsize=12)
+    ax.set_ylabel('Y (m)', fontsize=12)
+    ax.set_title('Top View - Object Detection Results', fontsize=14, weight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.axis('equal')
 
     # 保存图像
-    output_file = output_dir / f'inference_result_{frame_id:06d}.png'
+    output_file = output_dir / f'top_view_{frame_id:06d}.png'
     plt.tight_layout()
     plt.savefig(str(output_file), dpi=150, bbox_inches='tight')
-    print(f"  ✓ Visualization saved: {output_file}")
+    print(f"  ✓ Top view saved: {output_file}")
     plt.close()
+
+
+def save_segmented_ply(points, pred_boxes, pred_scores, output_dir, frame_id):
+    """
+    保存分割出的点云为 PLY 文件
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 为每个检测框内的点着色
+    point_colors = np.zeros((len(points), 3), dtype=np.uint8)
+    point_colors[:] = [128, 128, 128]  # 默认灰色
+    
+    # 颜色列表
+    colors = [
+        [255, 0, 0],      # 红色
+        [0, 255, 0],      # 绿色
+        [0, 0, 255],      # 蓝色
+        [255, 255, 0],    # 黄色
+        [255, 0, 255],    # 品红
+        [0, 255, 255],    # 青色
+    ]
+    
+    # 为检测框内的点着色
+    if len(pred_boxes) > 0:
+        for box_idx, box in enumerate(pred_boxes):
+            if pred_scores[box_idx] > 0.3:
+                x, y, z, dx, dy, dz, heading = box
+                
+                # 找出在该框内的点
+                in_box = (
+                    (points[:, 0] >= x - dx/2) & (points[:, 0] <= x + dx/2) &
+                    (points[:, 1] >= y - dy/2) & (points[:, 1] <= y + dy/2) &
+                    (points[:, 2] >= z - dz/2) & (points[:, 2] <= z + dz/2)
+                )
+                
+                # 为这些点着色
+                color = colors[box_idx % len(colors)]
+                point_colors[in_box] = color
+    
+    # 保存为 PLY 文件
+    output_file = output_dir / f'segmented_points_{frame_id:06d}.ply'
+    
+    # 创建 PLY 文件头
+    with open(str(output_file), 'w') as f:
+        f.write('ply\n')
+        f.write('format ascii 1.0\n')
+        f.write(f'element vertex {len(points)}\n')
+        f.write('property float x\n')
+        f.write('property float y\n')
+        f.write('property float z\n')
+        f.write('property uchar red\n')
+        f.write('property uchar green\n')
+        f.write('property uchar blue\n')
+        f.write('end_header\n')
+        
+        # 写入点数据
+        for i, point in enumerate(points):
+            f.write(f'{point[0]:.6f} {point[1]:.6f} {point[2]:.6f} ')
+            f.write(f'{int(point_colors[i, 0])} {int(point_colors[i, 1])} {int(point_colors[i, 2])}\n')
+    
+    print(f"  ✓ Segmented PLY saved: {output_file}")
 
 
 def main():
@@ -259,6 +265,16 @@ def main():
             pred_scores=pred_scores,
             pred_labels=pred_labels,
             class_names=class_names,
+            output_dir=output_dir,
+            frame_id=idx
+        )
+        
+        # 保存分割的点云
+        print(f"  Saving segmented point cloud...")
+        save_segmented_ply(
+            points=points,
+            pred_boxes=pred_boxes,
+            pred_scores=pred_scores,
             output_dir=output_dir,
             frame_id=idx
         )
