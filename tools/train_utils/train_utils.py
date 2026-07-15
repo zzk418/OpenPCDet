@@ -151,7 +151,8 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
                 start_epoch, total_epochs, start_iter, rank, tb_log, ckpt_save_dir, train_sampler=None,
                 lr_warmup_scheduler=None, ckpt_save_interval=1, max_ckpt_save_num=50,
                 merge_all_iters_to_one_epoch=False, use_amp=False,
-                use_logger_to_record=False, logger=None, logger_iter_interval=None, ckpt_save_time_interval=None, show_gpu_stat=False, cfg=None):
+                use_logger_to_record=False, logger=None, logger_iter_interval=None, ckpt_save_time_interval=None, show_gpu_stat=False, cfg=None,
+                eval_interval=None, test_loader=None, dist_test=False, eval_output_dir=None, class_names=None):
     accumulated_iter = start_iter
 
     # use for disable data augmentation hook
@@ -209,6 +210,30 @@ def train_model(model, optimizer, train_loader, model_func, lr_scheduler, optim_
                 save_checkpoint(
                     checkpoint_state(model, optimizer, trained_epoch, accumulated_iter), filename=ckpt_name,
                 )
+
+            # evaluation during training
+            if eval_interval is not None and test_loader is not None and eval_output_dir is not None:
+                if trained_epoch % eval_interval == 0 and rank == 0:
+                    from tools.eval_utils import eval_utils
+                    from pcdet.config import cfg
+                    logger.info('**********************Start eval epoch %s **********************' % trained_epoch)
+                    model.eval()
+                    cur_result_dir = eval_output_dir / ('epoch_%s' % trained_epoch) / cfg.DATA_CONFIG.DATA_SPLIT['test']
+                    cur_result_dir.mkdir(parents=True, exist_ok=True)
+                    with torch.no_grad():
+                        eval_utils.eval_one_epoch(
+                            cfg, type('Args', (), {
+                                'batch_size': optim_cfg.BATCH_SIZE_PER_GPU,
+                                'infer_time': False,
+                                'save_to_file': False,
+                                'ckpt': None,
+                            })(),
+                            model.module if dist_test else model,
+                            test_loader, trained_epoch, logger, dist_test=dist_test,
+                            result_dir=cur_result_dir
+                        )
+                    logger.info('**********************End eval epoch %s **********************' % trained_epoch)
+                    model.train()
 
 
 def model_state_to_cpu(model_state):

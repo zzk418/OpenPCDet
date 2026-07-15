@@ -105,12 +105,15 @@ def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=Fal
         metric = metric[0]
 
     gt_num_cnt = metric['gt_num']
+    # Check if this is a single-stage model (no ROI head): skip roi recall display if all zeros
+    has_roi = any(metric['recall_roi_%s' % str(t)] > 0 for t in cfg.MODEL.POST_PROCESSING.RECALL_THRESH_LIST)
     for cur_thresh in cfg.MODEL.POST_PROCESSING.RECALL_THRESH_LIST:
-        cur_roi_recall = metric['recall_roi_%s' % str(cur_thresh)] / max(gt_num_cnt, 1)
         cur_rcnn_recall = metric['recall_rcnn_%s' % str(cur_thresh)] / max(gt_num_cnt, 1)
-        logger.info('recall_roi_%s: %f' % (cur_thresh, cur_roi_recall))
+        if has_roi:
+            cur_roi_recall = metric['recall_roi_%s' % str(cur_thresh)] / max(gt_num_cnt, 1)
+            logger.info('recall_roi_%s: %f' % (cur_thresh, cur_roi_recall))
+            ret_dict['recall/roi_%s' % str(cur_thresh)] = cur_roi_recall
         logger.info('recall_rcnn_%s: %f' % (cur_thresh, cur_rcnn_recall))
-        ret_dict['recall/roi_%s' % str(cur_thresh)] = cur_roi_recall
         ret_dict['recall/rcnn_%s' % str(cur_thresh)] = cur_rcnn_recall
 
     total_pred_objects = 0

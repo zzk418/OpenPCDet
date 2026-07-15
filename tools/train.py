@@ -33,6 +33,7 @@ def parse_config():
     parser.add_argument('--sync_bn', action='store_true', default=False, help='whether to use sync bn')
     parser.add_argument('--fix_random_seed', action='store_true', default=False, help='')
     parser.add_argument('--ckpt_save_interval', type=int, default=1, help='number of training epochs')
+    parser.add_argument('--eval_interval', type=int, default=10, help='number of epochs per evaluation')
     parser.add_argument('--local_rank', type=int, default=None, help='local rank for distributed training')
     parser.add_argument('--max_ckpt_save_num', type=int, default=30, help='max number of saved checkpoint')
     parser.add_argument('--merge_all_iters_to_one_epoch', action='store_true', default=False, help='')
@@ -175,6 +176,21 @@ def main():
     logger.info('**********************Start training %s/%s(%s)**********************'
                 % (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
 
+    # build test loader for mid-training evaluation
+    mid_eval_test_loader = None
+    mid_eval_output_dir = None
+    if args.eval_interval is not None and args.eval_interval > 0:
+        logger.info("----------- Create test dataloader for mid-training evaluation -----------")
+        _, test_loader_eval, _ = build_dataloader(
+            dataset_cfg=cfg.DATA_CONFIG,
+            class_names=cfg.CLASS_NAMES,
+            batch_size=args.batch_size,
+            dist=dist_train, workers=args.workers, logger=logger, training=False
+        )
+        mid_eval_test_loader = test_loader_eval
+        mid_eval_output_dir = output_dir / 'eval' / 'eval_mid_train'
+        mid_eval_output_dir.mkdir(parents=True, exist_ok=True)
+
     train_model(
         model,
         optimizer,
@@ -199,7 +215,12 @@ def main():
         use_logger_to_record=not args.use_tqdm_to_record, 
         show_gpu_stat=not args.wo_gpu_stat,
         use_amp=args.use_amp,
-        cfg=cfg
+        cfg=cfg,
+        eval_interval=args.eval_interval,
+        test_loader=mid_eval_test_loader,
+        dist_test=dist_train,
+        eval_output_dir=mid_eval_output_dir,
+        class_names=cfg.CLASS_NAMES
     )
 
     if hasattr(train_set, 'use_shared_memory') and train_set.use_shared_memory:
@@ -207,26 +228,6 @@ def main():
 
     logger.info('**********************End training %s/%s(%s)**********************\n\n\n'
                 % (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
-
-    logger.info('**********************Start evaluation %s/%s(%s)**********************' %
-                (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
-    test_set, test_loader, sampler = build_dataloader(
-        dataset_cfg=cfg.DATA_CONFIG,
-        class_names=cfg.CLASS_NAMES,
-        batch_size=args.batch_size,
-        dist=dist_train, workers=args.workers, logger=logger, training=False
-    )
-    eval_output_dir = output_dir / 'eval' / 'eval_with_train'
-    eval_output_dir.mkdir(parents=True, exist_ok=True)
-    args.start_epoch = max(args.epochs - args.num_epochs_to_eval, 0)  # Only evaluate the last args.num_epochs_to_eval epochs
-
-    repeat_eval_ckpt(
-        model.module if dist_train else model,
-        test_loader, args, eval_output_dir, logger, ckpt_dir,
-        dist_test=dist_train
-    )
-    logger.info('**********************End evaluation %s/%s(%s)**********************' %
-                (cfg.EXP_GROUP_PATH, cfg.TAG, args.extra_tag))
 
 
 if __name__ == '__main__':
