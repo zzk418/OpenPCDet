@@ -325,21 +325,20 @@ def assign_cluster(cls_feat, feature_bank):
 
 
 def match_keypoints(patch_feats, cluster_data, conf_thresh=0.7, ratio_thresh=0.90,
-                    nms_patch_radius=3):
-    """用 anchor patch 特征在目标帧特征图上做余弦相似度匹配。
+                    nms_patch_radius=3, search_radius_px=120):
+    """用 anchor patch 特征在目标帧上做局部余弦相似度匹配。
 
-    每个 prototype anchor 只返回最优的 1 个匹配。
-    通过 ratio test (SIFT 风格) + spatial NMS 过滤模糊匹配:
-      - 找到最佳 patch 后，抑制其周围 nms_patch_radius 范围内的 patch
-      - 在抑制后的图中找次优匹配
-      - 如果次优/最优 > ratio_thresh，说明匹配不唯一，丢弃
+    关键改进: 不是全局搜索，而是在原型 anchor 像素位置 ±search_radius_px
+    范围内搜索。这利用了一个先验: 仓库场景中相机运动有限，货架角在帧间的
+    像素位移 < search_radius_px。
 
     Args:
         patch_feats: (Hp, Wp, 384) target frame patch features
         cluster_data: prototype cluster data with anchors
-        conf_thresh: minimum cosine similarity for best match
-        ratio_thresh: best/second-best ratio upper bound (lower=stricter)
-        nms_patch_radius: spatial suppression radius in patch units
+        conf_thresh: minimum cosine similarity
+        ratio_thresh: best/second-best ratio upper bound
+        nms_patch_radius: spatial suppression radius for ratio test
+        search_radius_px: search radius in pixels around prototype anchor position
 
     Returns:
         matches: [{anchor_id, pixel_uv, patch_uv, similarity, ratio, anchor_3d_proto}]
@@ -353,10 +352,26 @@ def match_keypoints(patch_feats, cluster_data, conf_thresh=0.7, ratio_thresh=0.9
         sim_map = np.dot(flat_feats, anchor_feat)
         sim_map = sim_map.reshape(p_h, p_w)
 
-        # Find best patch
-        best_idx = int(np.argmax(sim_map.ravel()))
+        # Constrain search to window around prototype anchor pixel position
+        proto_u, proto_v = anchor["pixel_uv"]
+        proto_pu, proto_pv = pixel_to_patch(proto_u, proto_v, patch_h=p_h, patch_w=p_w)
+        radius_patches = max(1, int(search_radius_px / 14))  # 14px per patch
+        pu_min = max(0, proto_pu - radius_patches)
+        pu_max = min(p_w, proto_pu + radius_patches + 1)
+        pv_min = max(0, proto_pv - radius_patches)
+        pv_max = min(p_h, proto_pv + radius_patches + 1)
+
+        # Mask out regions outside the search window
+        sim_masked = sim_map.copy()
+        sim_masked[:pv_min, :] = -2.0
+        sim_masked[pv_max:, :] = -2.0
+        sim_masked[:, :pu_min] = -2.0
+        sim_masked[:, pu_max:] = -2.0
+
+        # Find best patch within search window
+        best_idx = int(np.argmax(sim_masked.ravel()))
         best_pv, best_pu = divmod(best_idx, p_w)
-        best_sim = float(sim_map[best_pv, best_pu])
+        best_sim = float(sim_map[best_pv, best_pu])  # use original sim value
 
         if best_sim < conf_thresh:
             continue
@@ -557,7 +572,8 @@ def _filter_quad_geometry(matches, proto_anchors, max_vertical_px,
 
 def process_full_dataset(feature_bank, data_dir, output_dir, processor, model,
                          device="cuda", conf_thresh=0.7, ratio_thresh=0.90,
-                         enable_geometry_filter=True, max_frames=None):
+                         enable_geometry_filter=True, search_radius_px=120,
+                         max_frames=None):
     """Phase 2: 全量数据集特征匹配 + PCD 3D 查表。
 
     Args:
@@ -613,10 +629,11 @@ def process_full_dataset(feature_bank, data_dir, output_dir, processor, model,
         cluster_name, cluster_sim = assign_cluster(cls_feat, feature_bank)
         cluster_data = feature_bank[cluster_name]
 
-        # Match keypoints (ratio test + per-anchor top-1)
+        # Match keypoints (local search + ratio test + per-anchor top-1)
         raw_matches = match_keypoints(patch_feats, cluster_data,
                                       conf_thresh=conf_thresh,
-                                      ratio_thresh=ratio_thresh)
+                                      ratio_thresh=ratio_thresh,
+                                      search_radius_px=search_radius_px)
 
         # Geometric consistency filter
         if enable_geometry_filter and raw_matches:
@@ -930,6 +947,8 @@ def main():
                         help="Ratio test upper bound (lower=stricter)")
     parser.add_argument("--no_geometry_filter", action="store_true",
                         help="Disable geometric consistency filter")
+    parser.add_argument("--search_radius_px", type=int, default=120,
+                        help="Search radius in pixels around prototype anchor (default 120)")
     parser.add_argument("--viz_frames", type=int, default=None,
                         help="Max viz frames (default: all matched frames)")
     parser.add_argument("--max_frames", type=int, default=None)
@@ -971,6 +990,7 @@ def main():
         conf_thresh=args.conf_thresh,
         ratio_thresh=args.ratio_thresh,
         enable_geometry_filter=not args.no_geometry_filter,
+        search_radius_px=args.search_radius_px,
         max_frames=args.max_frames,
     )
 
