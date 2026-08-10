@@ -106,8 +106,8 @@ _GRID_PARAMS = None  # (patch_h, patch_w, actual_h, actual_w) cached from first 
 def load_dinov2(device="cuda"):
     """加载 DINOv2 ViT-S/14。"""
     print("Loading DINOv2 ViT-S/14...")
-    processor = AutoImageProcessor.from_pretrained("facebook/dinov2-small")
-    model = AutoModel.from_pretrained("facebook/dinov2-small").to(device).eval()
+    processor = AutoImageProcessor.from_pretrained("facebook/dinov2-small", local_files_only=True)
+    model = AutoModel.from_pretrained("facebook/dinov2-small", local_files_only=True).to(device).eval()
     print(f"  DINOv2 loaded on {device}, embed_dim=384")
     return processor, model
 
