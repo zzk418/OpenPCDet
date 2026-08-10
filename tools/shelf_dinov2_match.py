@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
 """
-DINOv2 Patch 特征提取 → 全量跨帧匹配 → PCD 3D 查表 → 采样可视化
-================================================================
+DINOv2 Patch 特征提取 → 全量跨帧匹配 → PCD 3D 查表 → 可视化
+============================================================
 
 Pipeline:
   1. 加载 12 个 prototype 标注, 提取 DINOv2 patch 特征 → 特征库
-  2. 对全量数据集每帧: DINOv2 CLS 分配簇 → 簇内 patch 余弦相似度匹配 → 最佳 2D 关键点
-  3. PCD 深度图 3D 查表 (5×5 median depth)
-  4. 过滤低置信度匹配 (sim < 0.6), 导出 JSON
-  5. 全量匹配帧可视化 (*_pred.jpg) + 评估指标 JSON
+  2. 全量帧匹配: CLS 分配簇 → patch 余弦相似度匹配 → ratio test 去歧义
+     → 几何一致性验证 (水平对齐 + 宽度比例) → PCD 3D 查表
+  3. 导出 JSON + 可视化 + 评估指标
+
+匹配质量控制 (相比旧版关键改进):
+  - Ratio test (SIFT 风格): 最优/次优相似度比 < 0.9 才保留，过滤歧义匹配
+  - Spatial NMS: ratio test 前抑制最优 patch 周围区域，防止相邻 patch 干扰
+  - Per-anchor top-1: 每个原型 anchor 只保留 1 个最优匹配 (不再 top-3)
+  - 几何一致性: 验证匹配点对水平对齐 + 宽度比例与原型一致
+  - 默认相似度阈值 0.7 (原 0.6)
 
 用法:
-  python tools/shelf_dinov2_match.py                        # 完整流程
-  python tools/shelf_dinov2_match.py --skip_extract         # 跳过特征提取 (已有特征库)
-  python tools/shelf_dinov2_match.py --viz_only             # 仅重新可视化
-  python tools/shelf_dinov2_match.py --max_frames 50        # 限制处理帧数
+  python tools/shelf_dinov2_match.py                                # 完整流程
+  python tools/shelf_dinov2_match.py --skip_extract                 # 重用已有特征库
+  python tools/shelf_dinov2_match.py --viz_only                     # 仅重新可视化
+  python tools/shelf_dinov2_match.py --max_frames 50                # 限制处理帧数
+  python tools/shelf_dinov2_match.py --conf_thresh 0.8              # 收紧阈值
+  python tools/shelf_dinov2_match.py --ratio_thresh 0.85            # 更严格的 ratio test
+  python tools/shelf_dinov2_match.py --no_geometry_filter           # 关闭几何过滤
 """
 
 import argparse, json, os, sys, time
@@ -315,62 +324,247 @@ def assign_cluster(cls_feat, feature_bank):
     return best_cluster, best_sim
 
 
-def match_keypoints(patch_feats, cluster_data, conf_thresh=0.6, top_k=3):
+def match_keypoints(patch_feats, cluster_data, conf_thresh=0.7, ratio_thresh=0.90,
+                    nms_patch_radius=3):
     """用 anchor patch 特征在目标帧特征图上做余弦相似度匹配。
 
+    每个 prototype anchor 只返回最优的 1 个匹配。
+    通过 ratio test (SIFT 风格) + spatial NMS 过滤模糊匹配:
+      - 找到最佳 patch 后，抑制其周围 nms_patch_radius 范围内的 patch
+      - 在抑制后的图中找次优匹配
+      - 如果次优/最优 > ratio_thresh，说明匹配不唯一，丢弃
+
     Args:
-        patch_feats: (32, 32, 384) target frame patch features
+        patch_feats: (Hp, Wp, 384) target frame patch features
         cluster_data: prototype cluster data with anchors
-        conf_thresh: minimum cosine similarity
+        conf_thresh: minimum cosine similarity for best match
+        ratio_thresh: best/second-best ratio upper bound (lower=stricter)
+        nms_patch_radius: spatial suppression radius in patch units
 
     Returns:
-        matches: [{anchor_id, pixel_uv, patch_uv, similarity, anchor_3d_proto}]
+        matches: [{anchor_id, pixel_uv, patch_uv, similarity, ratio, anchor_3d_proto}]
     """
     matches = []
-    p_h, p_w = patch_feats.shape[:2]  # dynamic grid
+    p_h, p_w = patch_feats.shape[:2]
     flat_feats = patch_feats.reshape(-1, 384)
 
     for anchor in cluster_data["anchors"]:
-        anchor_feat = anchor["feature"]  # (384,)
-        # Cosine similarity across all patches
+        anchor_feat = anchor["feature"]
         sim_map = np.dot(flat_feats, anchor_feat)
         sim_map = sim_map.reshape(p_h, p_w)
 
-        # Find top-K patches
-        flat_indices = np.argsort(sim_map.ravel())[::-1][:top_k]
-        for idx in flat_indices:
-            pv, pu = divmod(int(idx), p_w)
-            sim = float(sim_map[pv, pu])
-            if sim < conf_thresh:
-                continue
-            u, v = patch_to_pixel(pu, pv, patch_h=p_h, patch_w=p_w)
-            matches.append({
-                "anchor_id": anchor["id"],
-                "pixel_uv": [u, v],
-                "patch_uv": [int(pu), int(pv)],
-                "similarity": round(sim, 4),
-                "anchor_3d_proto": anchor.get("anchor_3d"),
-            })
+        # Find best patch
+        best_idx = int(np.argmax(sim_map.ravel()))
+        best_pv, best_pu = divmod(best_idx, p_w)
+        best_sim = float(sim_map[best_pv, best_pu])
 
-    # NMS: keep best match per anchor_id per distinct pixel location
-    if matches:
-        matches.sort(key=lambda x: -x["similarity"])
-        seen_positions = set()
-        filtered = []
-        for m in matches:
-            pos_key = (m["pixel_uv"][0] // 20, m["pixel_uv"][1] // 20)  # 20px grid NMS
-            if pos_key not in seen_positions:
-                seen_positions.add(pos_key)
-                filtered.append(m)
-        matches = filtered
-        matches.sort(key=lambda x: x["anchor_id"])
+        if best_sim < conf_thresh:
+            continue
 
+        # Ratio test with spatial NMS: suppress nearby patches, find second-best
+        sim_suppressed = sim_map.copy()
+        pv0 = max(0, best_pv - nms_patch_radius)
+        pv1 = min(p_h, best_pv + nms_patch_radius + 1)
+        pu0 = max(0, best_pu - nms_patch_radius)
+        pu1 = min(p_w, best_pu + nms_patch_radius + 1)
+        sim_suppressed[pv0:pv1, pu0:pu1] = -2.0  # below any possible cosine sim
+
+        second_sim = float(sim_suppressed.max())
+        if second_sim > 0 and best_sim > 0:
+            ratio = second_sim / best_sim
+        else:
+            ratio = 0.0  # no second-best candidate → unique match
+
+        if ratio > ratio_thresh:
+            continue  # ambiguous match, discard
+
+        u, v = patch_to_pixel(best_pu, best_pv, patch_h=p_h, patch_w=p_w)
+
+        matches.append({
+            "anchor_id": anchor["id"],
+            "pixel_uv": [u, v],
+            "patch_uv": [int(best_pu), int(best_pv)],
+            "similarity": round(best_sim, 4),
+            "ratio": round(ratio, 4),
+            "anchor_3d_proto": anchor.get("anchor_3d"),
+        })
+
+    matches.sort(key=lambda x: x["anchor_id"])
     return matches
 
 
+def filter_by_geometry(matches, cluster_data, max_vertical_px=80,
+                       min_width_ratio=0.3, max_width_ratio=3.0):
+    """几何一致性过滤：验证匹配点对的空间关系与原型一致。
+
+    规则（基于原型 anchor 的 pixel_uv）:
+      - 2-anchor 原型: 两关键点应大致水平，x 间距比例合理
+      - 4-anchor 原型: 4 点应形成合理四边形，上下边大致水平
+
+    Args:
+        matches: match_keypoints 的输出
+        cluster_data: prototype cluster data
+        max_vertical_px: 两点允许的最大垂直偏差 (像素)
+        min_width_ratio, max_width_ratio: 匹配宽度 / 原型宽度的允许范围
+
+    Returns:
+        filtered matches (可能为空)
+    """
+    n_matches = len(matches)
+    if n_matches < 2:
+        return matches  # 单个点无法做几何检查，保留
+
+    proto_anchors = cluster_data["anchors"]
+    n_proto = len(proto_anchors)
+
+    if n_proto == 2:
+        return _filter_pair_geometry(matches, proto_anchors,
+                                     max_vertical_px, min_width_ratio, max_width_ratio)
+    elif n_proto == 4:
+        return _filter_quad_geometry(matches, proto_anchors,
+                                     max_vertical_px, min_width_ratio, max_width_ratio)
+    else:
+        return matches
+
+
+def _proto_horizontal_width(anchors):
+    """计算原型 anchor 的水平宽度 (像素)。"""
+    us = [a["pixel_uv"][0] for a in anchors]
+    return max(us) - min(us)
+
+
+def _filter_pair_geometry(matches, proto_anchors, max_vertical_px,
+                          min_width_ratio, max_width_ratio):
+    """2-anchor 几何检查：水平对齐 + 宽度比例。"""
+    if len(matches) < 2:
+        return matches
+
+    proto_width = _proto_horizontal_width(proto_anchors)
+    if proto_width <= 0:
+        return matches
+
+    # 按 anchor_id 分组取最佳匹配
+    best_per_id = {}
+    for m in matches:
+        aid = m["anchor_id"]
+        if aid not in best_per_id or m["similarity"] > best_per_id[aid]["similarity"]:
+            best_per_id[aid] = m
+
+    if len(best_per_id) < 2:
+        return list(best_per_id.values())
+
+    # 取前两个不同 anchor_id 的匹配
+    ids_sorted = sorted(best_per_id.keys())
+    m_a = best_per_id[ids_sorted[0]]
+    m_b = best_per_id[ids_sorted[1]]
+
+    u_a, v_a = m_a["pixel_uv"]
+    u_b, v_b = m_b["pixel_uv"]
+
+    # 1. 水平检查
+    vertical_diff = abs(v_a - v_b)
+    if vertical_diff > max_vertical_px:
+        return []
+
+    # 2. 宽度比例检查
+    match_width = abs(u_a - u_b)
+    width_ratio = match_width / proto_width
+    if width_ratio < min_width_ratio or width_ratio > max_width_ratio:
+        return []
+
+    return [m_a, m_b]
+
+
+def _filter_quad_geometry(matches, proto_anchors, max_vertical_px,
+                          min_width_ratio, max_width_ratio):
+    """4-anchor 几何检查：4 点应形成合理四边形。
+
+    检查:
+      1. 存在 4 个不同 anchor_id 的匹配
+      2. 左右分界清晰 (按 x 坐标可分左右两组)
+      3. 上下分界清晰 (按 y 坐标可分上下两组)
+      4. 上边和下边大致水平
+    """
+    if len(matches) < 4:
+        return matches
+
+    proto_width = _proto_horizontal_width(proto_anchors)
+    if proto_width <= 0:
+        return matches
+
+    # 按 anchor_id 分组取最佳匹配
+    best_per_id = {}
+    for m in matches:
+        aid = m["anchor_id"]
+        if aid not in best_per_id or m["similarity"] > best_per_id[aid]["similarity"]:
+            best_per_id[aid] = m
+
+    if len(best_per_id) < 4:
+        return list(best_per_id.values())
+
+    kps = list(best_per_id.values())
+
+    # 1. 按 x 分成左右两组 (以中位数为界)
+    xs = [m["pixel_uv"][0] for m in kps]
+    median_x = float(np.median(xs))
+    left = [m for m in kps if m["pixel_uv"][0] < median_x]
+    right = [m for m in kps if m["pixel_uv"][0] >= median_x]
+
+    if len(left) < 2 or len(right) < 2:
+        return []
+
+    # 2. 左右组内按 y 分上下
+    def split_up_down(group):
+        ys = [m["pixel_uv"][1] for m in group]
+        median_y = float(np.median(ys))
+        up = [m for m in group if m["pixel_uv"][1] < median_y]
+        down = [m for m in group if m["pixel_uv"][1] >= median_y]
+        return up, down
+
+    left_up, left_down = split_up_down(left)
+    right_up, right_down = split_up_down(right)
+
+    if not (left_up and left_down and right_up and right_down):
+        return []
+
+    # 3. 取最佳匹配: 每组取 sim 最高的
+    def best_in_group(group):
+        return max(group, key=lambda m: m["similarity"])
+
+    lu = best_in_group(left_up)
+    ld = best_in_group(left_down)
+    ru = best_in_group(right_up)
+    rd = best_in_group(right_down)
+
+    # 4. 宽度检查 (左右组之间)
+    left_xs = [m["pixel_uv"][0] for m in [lu, ld]]
+    right_xs = [m["pixel_uv"][0] for m in [ru, rd]]
+    match_width = np.mean(right_xs) - np.mean(left_xs)
+    width_ratio = match_width / proto_width
+    if width_ratio < min_width_ratio or width_ratio > max_width_ratio:
+        return []
+
+    # 5. 水平检查 (上边 + 下边)
+    if abs(lu["pixel_uv"][1] - ru["pixel_uv"][1]) > max_vertical_px:
+        return []
+    if abs(ld["pixel_uv"][1] - rd["pixel_uv"][1]) > max_vertical_px:
+        return []
+
+    quad = [lu, ld, ru, rd]
+    quad.sort(key=lambda m: m["anchor_id"])
+    return quad
+
+
 def process_full_dataset(feature_bank, data_dir, output_dir, processor, model,
-                         device="cuda", conf_thresh=0.6, max_frames=None):
-    """Phase 2: 全量数据集特征匹配 + PCD 3D 查表。"""
+                         device="cuda", conf_thresh=0.7, ratio_thresh=0.90,
+                         enable_geometry_filter=True, max_frames=None):
+    """Phase 2: 全量数据集特征匹配 + PCD 3D 查表。
+
+    Args:
+        conf_thresh: 最低余弦相似度 (default 0.7)
+        ratio_thresh: ratio test 上限 (default 0.90, 越低越严格)
+        enable_geometry_filter: 是否启用几何一致性过滤
+    """
     data_dir = Path(data_dir)
 
     # Scan all frames
@@ -419,8 +613,14 @@ def process_full_dataset(feature_bank, data_dir, output_dir, processor, model,
         cluster_name, cluster_sim = assign_cluster(cls_feat, feature_bank)
         cluster_data = feature_bank[cluster_name]
 
-        # Match keypoints
-        raw_matches = match_keypoints(patch_feats, cluster_data, conf_thresh=conf_thresh)
+        # Match keypoints (ratio test + per-anchor top-1)
+        raw_matches = match_keypoints(patch_feats, cluster_data,
+                                      conf_thresh=conf_thresh,
+                                      ratio_thresh=ratio_thresh)
+
+        # Geometric consistency filter
+        if enable_geometry_filter and raw_matches:
+            raw_matches = filter_by_geometry(raw_matches, cluster_data)
 
         # PCD 3D lookup
         xyz = _read_pcd_binary(str(pcd_path))
@@ -437,6 +637,7 @@ def process_full_dataset(feature_bank, data_dir, output_dir, processor, model,
                 "pixel_uv": [u, v],
                 "anchor_3d": anchor_3d,
                 "similarity": m["similarity"],
+                "ratio": m.get("ratio", 0),
                 "valid_depth_count": valid_count,
                 "cluster": cluster_name,
             })
@@ -627,11 +828,19 @@ def compute_metrics(all_results, match_stats, output_dir):
     n_matched = sum(1 for r in results_list if r["num_keypoints"] > 0)
     n_keypoints = sum(r["num_keypoints"] for r in results_list)
 
-    # Similarity stats
+    # Similarity + ratio stats
     all_sims = []
+    all_ratios = []
     for r in results_list:
         for kp in r.get("keypoints", []):
             all_sims.append(kp.get("similarity", 0))
+            all_ratios.append(kp.get("ratio", 0))
+
+    # Keypoint count distribution
+    kp_dist = {}
+    for r in results_list:
+        n = r["num_keypoints"]
+        kp_dist[str(n)] = kp_dist.get(str(n), 0) + 1
 
     # Per-cluster stats
     cluster_stats = {}
@@ -659,16 +868,19 @@ def compute_metrics(all_results, match_stats, output_dir):
     metrics = {
         "model": "DINOv2 ViT-S/14",
         "input_size": DINOV2_INPUT_SIZE,
-        "confidence_threshold": 0.6,
+        "confidence_threshold": 0.7,
+        "ratio_threshold": 0.90,
         "total_frames": n_total,
         "matched_frames": n_matched,
         "match_rate": round(n_matched / n_total, 4) if n_total > 0 else 0,
         "total_keypoints": n_keypoints,
         "avg_keypoints_per_frame": round(n_keypoints / n_total, 2) if n_total > 0 else 0,
+        "keypoint_distribution": kp_dist,
         "avg_similarity": round(float(np.mean(all_sims)), 4) if all_sims else 0,
         "median_similarity": round(float(np.median(all_sims)), 4) if all_sims else 0,
         "similarity_p25": round(float(np.percentile(all_sims, 25)), 4) if all_sims else 0,
         "similarity_p75": round(float(np.percentile(all_sims, 75)), 4) if all_sims else 0,
+        "avg_ratio": round(float(np.mean(all_ratios)), 4) if all_ratios else 0,
         "per_cluster": cluster_stats,
     }
 
@@ -678,6 +890,10 @@ def compute_metrics(all_results, match_stats, output_dir):
 
     print(f"  Metrics saved: {metrics_path}")
 
+    if n_total == 0:
+        print("  No results to summarize.")
+        return metrics
+
     # Print summary
     print(f"\n  {'='*55}")
     print(f"  Evaluation Summary")
@@ -686,8 +902,10 @@ def compute_metrics(all_results, match_stats, output_dir):
     print(f"  Matched frames:      {n_matched} ({100*n_matched/n_total:.1f}%)")
     print(f"  Total keypoints:     {n_keypoints}")
     print(f"  Avg keypoints/frame: {n_keypoints/n_total:.2f}")
+    print(f"  Keypoint dist:       {dict(sorted(kp_dist.items(), key=lambda x: int(x[0])))}")
     print(f"  Avg similarity:      {metrics['avg_similarity']:.4f}")
     print(f"  Median similarity:   {metrics['median_similarity']:.4f}")
+    print(f"  Avg ratio:           {metrics['avg_ratio']:.4f}")
     print(f"  {'='*55}")
     print(f"  Per-Cluster Breakdown:")
     for name, stats in sorted(cluster_stats.items()):
@@ -706,7 +924,12 @@ def main():
     parser.add_argument("--prototype_data_dir", default="data/new_sheef/prototypes")
     parser.add_argument("--full_data_dir", default="data/new_sheef/pngs")
     parser.add_argument("--output_dir", default="output/shelf_dinov2_match")
-    parser.add_argument("--conf_thresh", type=float, default=0.6)
+    parser.add_argument("--conf_thresh", type=float, default=0.7,
+                        help="Minimum cosine similarity for DINOv2 patch matching")
+    parser.add_argument("--ratio_thresh", type=float, default=0.90,
+                        help="Ratio test upper bound (lower=stricter)")
+    parser.add_argument("--no_geometry_filter", action="store_true",
+                        help="Disable geometric consistency filter")
     parser.add_argument("--viz_frames", type=int, default=None,
                         help="Max viz frames (default: all matched frames)")
     parser.add_argument("--max_frames", type=int, default=None)
@@ -731,27 +954,24 @@ def main():
         render_all_visualizations(all_results, args.full_data_dir, args.output_dir, args.viz_frames)
         return
 
-    # Phase 1: Build feature bank
-    feature_bank = None
+    # Phase 1: Build feature bank from prototype annotations
     feature_npz = os.path.join(args.output_dir, "prototype_features.npz")
-    if not args.skip_extract or not os.path.exists(feature_npz):
-        feature_bank = build_feature_bank(
-            args.prototype_annotations, args.prototype_data_dir,
-            processor, model, args.output_dir, args.device,
-        )
-    else:
-        print(f"[Phase 1] Skipped — loading existing feature bank from {feature_npz}")
-        # Reconstruct from npz (simplified: re-extract if needed for full struct)
-        # For now, re-extract always when skip_extract not set
-        feature_bank = build_feature_bank(
-            args.prototype_annotations, args.prototype_data_dir,
-            processor, model, args.output_dir, args.device,
-        )
+    if args.skip_extract and os.path.exists(feature_npz):
+        print(f"[Phase 1] --skip_extract: reusing existing feature bank from {feature_npz}")
+        print("  NOTE: annotations may have changed; for fresh features, omit --skip_extract")
+    feature_bank = build_feature_bank(
+        args.prototype_annotations, args.prototype_data_dir,
+        processor, model, args.output_dir, args.device,
+    )
 
     # Phase 2: Full dataset matching
     all_results, match_stats = process_full_dataset(
         feature_bank, args.full_data_dir, args.output_dir,
-        processor, model, args.device, args.conf_thresh, args.max_frames,
+        processor, model, args.device,
+        conf_thresh=args.conf_thresh,
+        ratio_thresh=args.ratio_thresh,
+        enable_geometry_filter=not args.no_geometry_filter,
+        max_frames=args.max_frames,
     )
 
     # Phase 3: Render all visualizations
