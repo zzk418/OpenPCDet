@@ -591,12 +591,14 @@ def render_all_visualizations(all_results, data_dir, output_dir, max_frames=None
         print(f"\n[Phase 3] Rendering all {n_matched} matched frames...")
 
     for stem, result in matched:
-        num_id = stem.replace("TV_", "")
         img_path = None
         for ext in [".jpg", ".png"]:
-            cand = data_dir / f"{num_id}{ext}"
-            if cand.exists():
-                img_path = str(cand)
+            for cand_name in [stem, stem.replace("TV_", "")]:
+                cand = data_dir / f"{cand_name}{ext}"
+                if cand.exists():
+                    img_path = str(cand)
+                    break
+            if img_path:
                 break
         if img_path is None:
             continue
