@@ -143,6 +143,7 @@ def _to_native(obj):
 
 DATA_DIR = None
 OUTPUT_DIR = None
+YOLO_LABELS_DIR = None   # YOLO-format labels dir (for loading pseudo-labels)
 STEMS = []          # list of pcd stems like "TV_250000036488"
 FRAMES = []         # list of {stem, pcd_path, img_path, has_result}
 IMG_W, IMG_H = 640, 480
@@ -170,6 +171,37 @@ def _cached_depth_map(stem):
         del _dm_cache[oldest]
     _dm_cache[stem] = (xyz, dm)
     return xyz, dm
+
+
+def _load_yolo_labels(stem, img_w=640, img_h=480, K=4):
+    """从 YOLO labels 目录加载伪标注关键点 → [(u, v), ...]。
+
+    扫描 train/ 和 val/ 子目录。
+    YOLO pose 格式: class_id cx cy bw bh x1 y1 v1 ... xK yK vK
+    """
+    if not YOLO_LABELS_DIR:
+        return None
+    for split in ("train", "val"):
+        label_path = os.path.join(YOLO_LABELS_DIR, split, f"{stem}.txt")
+        if os.path.exists(label_path):
+            try:
+                with open(label_path) as f:
+                    line = f.readline().strip()
+                parts = line.split()
+                if len(parts) < 5 + K * 3:
+                    continue
+                kps = []
+                for i in range(K):
+                    x = float(parts[5 + i * 3])
+                    y = float(parts[5 + i * 3 + 1])
+                    v = float(parts[5 + i * 3 + 2])
+                    if v > 0:
+                        kps.append((x * img_w, y * img_h))
+                if kps:
+                    return kps
+            except Exception:
+                pass
+    return None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -271,6 +303,20 @@ def api_load(stem):
                     }]
         except Exception:
             pass
+
+    # 如果没有已保存的关键点，尝试加载 YOLO 伪标注
+    if saved_keypoints is None:
+        yolo_kps = _load_yolo_labels(stem, IMG_W, IMG_H)
+        if yolo_kps and dm is not None:
+            saved_keypoints = []
+            for i, (u, v) in enumerate(yolo_kps):
+                anchor_3d = _get_anchor_3d(int(u), int(v), dm)
+                saved_keypoints.append({
+                    "id": i,
+                    "pixel_uv": [int(u), int(v)],
+                    "anchor_3d": anchor_3d,
+                    "label": f"YOLO-pseudo-{i}",
+                })
 
     elapsed = time.time() - t0
     return jsonify(_to_native({
@@ -983,6 +1029,8 @@ def main():
     parser = argparse.ArgumentParser(description="Shelf Anchor V2 — Web 批量审核")
     parser.add_argument("--data_dir", default="data/new_sheef/prototypes")
     parser.add_argument("--output_dir", default="data/new_sheef/prototype_annotations")
+    parser.add_argument("--yolo_labels_dir", default=None,
+                        help="YOLO labels directory (e.g. datasets/shelf_pose_pseudo/labels) — load pseudo-labels as initial keypoints")
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--host", default="0.0.0.0")
     # Camera
@@ -994,15 +1042,33 @@ def main():
     parser.add_argument("--img_h", type=int, default=480)
     args = parser.parse_args()
 
-    global DATA_DIR, OUTPUT_DIR, FX, FY, CX, CY, IMG_W, IMG_H
+    global DATA_DIR, OUTPUT_DIR, YOLO_LABELS_DIR, FX, FY, CX, CY, IMG_W, IMG_H
     DATA_DIR = args.data_dir
     OUTPUT_DIR = args.output_dir
+    YOLO_LABELS_DIR = args.yolo_labels_dir
     FX, FY, CX, CY = args.fx, args.fy, args.cx, args.cy
     IMG_W, IMG_H = args.img_w, args.img_h
 
     frames = _scan_frames(DATA_DIR)
     print(f"Found {len(frames)} frames in {DATA_DIR}")
+
+    # 如果指定了 YOLO labels dir，只显示有 YOLO 标签的帧
+    if YOLO_LABELS_DIR:
+        global FRAMES, STEMS
+        yolo_stems = set()
+        for split in ("train", "val"):
+            split_dir = os.path.join(YOLO_LABELS_DIR, split)
+            if os.path.isdir(split_dir):
+                for f in os.listdir(split_dir):
+                    if f.endswith(".txt"):
+                        yolo_stems.add(f.replace(".txt", ""))
+        STEMS = [s for s in STEMS if s in yolo_stems]
+        FRAMES = [f for f in FRAMES if f["stem"] in yolo_stems]
+        print(f"Filtered to {len(FRAMES)} frames with YOLO labels")
+
     print(f"Output: {OUTPUT_DIR}")
+    if YOLO_LABELS_DIR:
+        print(f"YOLO labels: {YOLO_LABELS_DIR} (pseudo-labels as initial keypoints)")
     print(f"\nOpen http://localhost:{args.port} in your browser")
     print(f"\nMulti-keypoint annotation:")
     print(f"  Left-click  — Add keypoint (auto PCD lookup)")
