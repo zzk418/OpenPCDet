@@ -2,11 +2,15 @@ demo_data
 warehouse_data
 work
 fig
+datasets
+*.pt
+weights
+snapshot
 
 **__pycache__**
-**build**
+**/build/
+**/dist/
 **egg-info**
-**dist**
 data/
 *.pyc
 venv/

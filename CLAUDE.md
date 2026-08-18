@@ -1,6 +1,7 @@
 # OpenPCDet — 仓储 3D 目标检测
 
-> 笔记: `F:\kie_note\项目\仓库运输语义理解规划` (WSL: `/kie_note/项目/仓库运输语义理解规划`)
+> 笔记: `F:\kie_note\项目\仓库运输语义理解规划` (WSL: `/kie_note/项目/仓库运输语义理解规划`)  
+> 图片: 统一放 `assets/` 子目录
 
 ## 环境
 
@@ -60,6 +61,40 @@ python centerpoint_warehouse_inference.py --show_labels --max_samples 1 --output
 - 裁剪: GT+Pred 框紧凑裁剪, padding=4m
 - 标签: 英文 (Box / ELF / CargoBike / FTS / ForkLift), 默认关闭, `--show_labels` 开启
 - 输出 `prediction_centers.json` 记录所有检测框中心点坐标
+
+### YOLO-Pose 货架关键点可视化 (v4 风格)
+
+用于 `infer_shelf_anchor.py` / `continue_train_v5.py` 推理输出。
+
+- 关键点: 红色圆点 (BGR=0,0,255), 半径 4px, 细十字准线 ±6px, 黑色轮廓线宽 1px
+- 编号: P1/P2 标在关键点右上角, 红色小字
+- 连线: 两关键点之间红色虚线连接 (虚线段长 ~8px)
+- 中心点: 黄色 **X** 标记 (BGR=0,255,255), 粗 2px, 大小 ±5px
+- 图例面板: 左上角深灰半透明 (BGR=40,40,40, alpha=0.75), 外边框灰 (100,100,100)
+  - 标题: "Shelf Corners (N pts)" 金色 (BGR=80,200,255)
+  - 逐点: `P1  X 1234  Y -567  Z 2100` — 红色标签 + 白色坐标
+  - 中心: `C X 1234  Y -567  Z 2100` — 黄色标签 + 浅黄坐标 (BGR=255,255,150)
+  - 分隔线隔开点列表和中心行
+- 底部信息: 右下角灰色 "YOLO-Pose | N corners"
+- 输出 `prediction_centers.json` 记录所有检测关键点 3D 坐标 + 中心点 XYZ
+
+## 货架关键点标注
+
+### 数据
+
+- **原型点云与图片**: `data/new_sheef/prototypes/` (12 帧, `clusterN_TV_*.pcd` + `.jpg`)
+- **标注输出**: `data/new_sheef/prototype_annotations/` (每帧 `{stem}_anchor_v2.json`)
+
+### Web 标注工具
+
+```bash
+python tools/shelf_anchor_v3_web.py
+# 打开 http://localhost:5000
+# 左键点击 → PCD 查表添加关键点
+# ENTER → 保存并下一帧
+```
+
+JSON 格式: `{stem, num_keypoints, keypoints: [{id, pixel_uv, anchor_3d, median_depth, label}]}`
 
 ## 评估
 
