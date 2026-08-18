@@ -156,7 +156,7 @@ def main():
     with open(out_path, 'w', encoding='utf-8') as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
     print(f"\n已保存: {out_path}")
-    print("\n提示: 用此出厂值更新 shelf_anchor_v3_web.py 的 FX/FY/CX/CY 和推理脚本内参。")
+    print("\n提示: 用此出厂值更新 shelf_anchor_web.py 的 FX/FY/CX/CY 和推理脚本内参。")
 
 
 if __name__ == '__main__':

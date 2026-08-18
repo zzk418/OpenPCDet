@@ -278,7 +278,7 @@ def main():
     process_stems(stems, model, conf=args.conf)
 
     print(f"\nDone! Start review:")
-    print(f"  python tools/shelf_anchor_v3_web.py \\")
+    print(f"  python tools/shelf_anchor_web.py \\")
     print(f"    --data_dir data/new_sheef/pseudo_review_90 \\")
     print(f"    --output_dir datasets/shelf_pose_pseudo/reviewed")
 

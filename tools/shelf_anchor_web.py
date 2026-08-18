@@ -5,9 +5,9 @@ Shelf Anchor V2 — Web 批量交互审核
 人机协作 Web 界面: 自动提案 → 确认/修正 → PCD 查表 → 保存。
 
 用法:
-  python tools/shelf_anchor_v3_web.py
-  python tools/shelf_anchor_v3_web.py --port 8080 --data_dir data/new_sheef/pngs   # 全量数据
-  python tools/shelf_anchor_v3_web.py --data_dir data/new_sheef/prototypes         # 原型 (默认)
+  python tools/shelf_anchor_web.py
+  python tools/shelf_anchor_web.py --port 8080 --data_dir data/new_sheef/pngs   # 全量数据
+  python tools/shelf_anchor_web.py --data_dir data/new_sheef/prototypes         # 原型 (默认)
 
 打开浏览器 http://localhost:5000，快速审核:
   左键点击  — 修正 anchor 位置

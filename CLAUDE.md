@@ -88,7 +88,7 @@ python centerpoint_warehouse_inference.py --show_labels --max_samples 1 --output
 ### Web 标注工具
 
 ```bash
-python tools/shelf_anchor_v3_web.py
+python tools/shelf_anchor_web.py
 # 打开 http://localhost:5000
 # 左键点击 → PCD 查表添加关键点
 # ENTER → 保存并下一帧
