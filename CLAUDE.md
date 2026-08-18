@@ -108,4 +108,5 @@ KITTI 官方 eval 协议: 3D IoU → TP/FP/FN 匹配 → 41 点插值 PR 曲线 
 
 - **提交规范**: conventional commit (`feat`/`fix`/`chore`/`refactor`), 按功能逻辑分组, 禁止一次性大备份提交
 - **分支**: WIP/重构走 feature 分支, master 保持干净; 重写历史/force-push 需用户明确确认
+- **分支约定**: 货架项目相关改动统一在 `shelf` 分支; master 保留框架/仓储主项目基线
 - **提交内容**: 提交前 `git status` + `git diff --cached` 核对实际内容; 改 .gitignore 规则后检查是否误伤同名文件 (曾因 `**build**` 误忽略 `build_night_dataset.py`)
