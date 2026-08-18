@@ -52,7 +52,7 @@ def _read_pcd_binary(path: str):
     return xyz, rgb
 
 
-def _build_depth_map(xyz, img_w=640, img_h=480, fx=420, fy=420, cx=320, cy=240):
+def _build_depth_map(xyz, img_w=640, img_h=480, fx=410.9, fy=410.9, cx=307.0, cy=264.3):
     x, y, z = xyz[:, 0], xyz[:, 1], xyz[:, 2]
     valid = z > 1.0
     xv, yv, zv = x[valid], y[valid], z[valid]
@@ -67,7 +67,7 @@ def _build_depth_map(xyz, img_w=640, img_h=480, fx=420, fy=420, cx=320, cy=240):
     return dm
 
 
-def _get_anchor_3d(u0, v0, depth_map, window=5, fx=420, fy=420, cx=320, cy=240):
+def _get_anchor_3d(u0, v0, depth_map, window=5, fx=410.9, fy=410.9, cx=307.0, cy=264.3):
     h, w = depth_map.shape
     half = window // 2
     u_min, u_max = max(0, u0 - half), min(w, u0 + half + 1)
@@ -143,10 +143,12 @@ def _to_native(obj):
 
 DATA_DIR = None
 OUTPUT_DIR = None
+YOLO_LABELS_DIR = None   # YOLO-format labels dir (for loading pseudo-labels)
 STEMS = []          # list of pcd stems like "TV_250000036488"
 FRAMES = []         # list of {stem, pcd_path, img_path, has_result}
 IMG_W, IMG_H = 640, 480
-FX, FY, CX, CY = 420.0, 420.0, 307.0, 264.0
+# Eagle-M4 Mega 实测: fy=410.88, cy≈264.3 (PCD 网格); fx 方形像素先验; 出厂值见 tools/query_camera_intrinsics.py
+FX, FY, CX, CY = 410.9, 410.9, 307.0, 264.3
 
 # 深度图缓存: 避免每次点击都重读 PCD
 _dm_cache = {}  # stem → (xyz, depth_map)
@@ -172,6 +174,40 @@ def _cached_depth_map(stem):
     return xyz, dm
 
 
+def _load_yolo_labels(stem, img_w=640, img_h=480, K=4):
+    """从 YOLO labels 目录加载伪标注关键点 → [(u, v), ...]。
+
+    扫描 train/ 和 val/ 子目录。
+    YOLO pose 格式: class_id cx cy bw bh x1 y1 v1 ... xK yK vK
+    K 由标签格式自动检测。
+    """
+    if not YOLO_LABELS_DIR:
+        return None
+    for split in ("train", "val"):
+        label_path = os.path.join(YOLO_LABELS_DIR, split, f"{stem}.txt")
+        if os.path.exists(label_path):
+            try:
+                with open(label_path) as f:
+                    line = f.readline().strip()
+                parts = line.split()
+                if len(parts) < 8:  # at least class + bbox + 1 kp
+                    continue
+                # Auto-detect K from number of parts
+                K_actual = (len(parts) - 5) // 3
+                kps = []
+                for i in range(K_actual):
+                    x = float(parts[5 + i * 3])
+                    y = float(parts[5 + i * 3 + 1])
+                    v = float(parts[5 + i * 3 + 2])
+                    if v > 0:
+                        kps.append((x * img_w, y * img_h))
+                if kps:
+                    return kps
+            except Exception:
+                pass
+    return None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # API
 # ══════════════════════════════════════════════════════════════════════════════
@@ -185,15 +221,23 @@ def index():
 def api_info():
     """返回全局配置和帧列表摘要。"""
     done = 0
+    skipped = 0
     for f in FRAMES:
         out_json = os.path.join(OUTPUT_DIR, f"{f['stem']}_anchor_v2.json")
-        f["has_result"] = os.path.exists(out_json)
-        if f["has_result"]:
-            done += 1
+        if os.path.exists(out_json):
+            try:
+                with open(out_json) as fh:
+                    d = json.load(fh)
+                if d.get("skipped"):
+                    skipped += 1
+                elif d.get("reviewed", True):
+                    done += 1
+            except Exception:
+                done += 1  # unreadable → count as done
     return jsonify({
         "total": len(FRAMES),
         "done": done,
-        "pending": len(FRAMES) - done,
+        "pending": len(FRAMES) - done - skipped,
         "img_w": IMG_W,
         "img_h": IMG_H,
     })
@@ -217,6 +261,8 @@ def api_frames():
                     n_kp = d.get("num_keypoints", len(d.get("keypoints", [])))
                     if not n_kp and "anchor_3d" in d:
                         n_kp = 1
+                    # 模型伪标签 (reviewed=false) 不算已完成
+                    is_reviewed = d.get("reviewed", True)
             except Exception:
                 pass
         num_id = f["stem"].replace("TV_", "")
@@ -224,7 +270,7 @@ def api_frames():
             "index": i,
             "stem": f["stem"],
             "num_id": num_id,
-            "done": has and not skipped,
+            "done": has and not skipped and is_reviewed,
             "skipped": skipped,
             "n_keypoints": n_kp,
         })
@@ -244,6 +290,9 @@ def api_load(stem):
     img = cv2.imread(frame["img_path"])
     if img is None:
         return jsonify({"error": "Cannot read image"}), 500
+    orig_h, orig_w = img.shape[:2]
+    scale_u = IMG_W / orig_w if orig_w != IMG_W else 1.0
+    scale_v = IMG_H / orig_h if orig_h != IMG_H else 1.0
     if img.shape[0] != IMG_H or img.shape[1] != IMG_W:
         img = cv2.resize(img, (IMG_W, IMG_H))
     _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -271,6 +320,41 @@ def api_load(stem):
                     }]
         except Exception:
             pass
+
+    # 缩放已保存关键点的 pixel_uv 到 640x480 画布，并回填缺失的 anchor_3d
+    # 只对在原始分辨率 (如 1280x960) 中的旧伪标签做缩放；
+    # 新伪标签已在 640x480 中，检测到任何坐标超出画布范围才缩放
+    if saved_keypoints:
+        # 判断是否需要缩放：是否有坐标超出 640x480 范围
+        needs_scale = False
+        if scale_u != 1.0 or scale_v != 1.0:
+            for kp in saved_keypoints:
+                if kp.get("pixel_uv"):
+                    u, v = kp["pixel_uv"][0], kp["pixel_uv"][1]
+                    if u >= IMG_W or v >= IMG_H:
+                        needs_scale = True
+                        break
+        for kp in saved_keypoints:
+            if kp.get("pixel_uv"):
+                if needs_scale:
+                    kp["pixel_uv"] = [int(kp["pixel_uv"][0] * scale_u), int(kp["pixel_uv"][1] * scale_v)]
+                if not kp.get("anchor_3d") and dm is not None:
+                    u, v = int(kp["pixel_uv"][0]), int(kp["pixel_uv"][1])
+                    kp["anchor_3d"] = _get_anchor_3d(u, v, dm)
+
+    # 如果没有已保存的关键点，尝试加载 YOLO 伪标注
+    if saved_keypoints is None:
+        yolo_kps = _load_yolo_labels(stem, IMG_W, IMG_H)
+        if yolo_kps and dm is not None:
+            saved_keypoints = []
+            for i, (u, v) in enumerate(yolo_kps):
+                anchor_3d = _get_anchor_3d(int(u), int(v), dm)
+                saved_keypoints.append({
+                    "id": i,
+                    "pixel_uv": [int(u), int(v)],
+                    "anchor_3d": anchor_3d,
+                    "label": f"YOLO-pseudo-{i}",
+                })
 
     elapsed = time.time() - t0
     return jsonify(_to_native({
@@ -331,6 +415,7 @@ def api_save_frame():
         "num_keypoints": len(keypoints),
         "keypoints": keypoints,
         "method": "web_review",
+        "reviewed": True,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     out_json = os.path.join(OUTPUT_DIR, f"{stem}_anchor_v2.json")
@@ -452,6 +537,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft Ya
   <div id="info-bar">
     <span><span class="label">自动提案: </span><span class="value warn" id="info-auto">-</span></span>
     <span><span class="label">关键点: </span><span class="value" id="info-kp-count">0</span></span>
+    <span><span class="label">辅助线角度: </span><span class="value" id="info-guide">-</span></span>
     <span><span class="label">耗时: </span><span class="value" id="info-time">-</span></span>
   </div>
 </div>
@@ -467,7 +553,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft Ya
   </div>
   <div id="right-footer">
     <kbd>左键</kbd>添加关键点 &nbsp; <kbd>右键</kbd>删除 &nbsp; <kbd>ENTER</kbd>保存并下一帧<br>
-    <kbd>S</kbd>保存 &nbsp; <kbd>ESC</kbd>跳过 &nbsp; <kbd>&#8592;&#8594;</kbd>导航 &nbsp; <kbd>G</kbd>跳转
+    <kbd>S</kbd>保存 &nbsp; <kbd>ESC</kbd>跳过 &nbsp; <kbd>&#8592;&#8594;</kbd>导航 &nbsp; <kbd>G</kbd>跳转<br>
+    两个关键点间自动显示<span style="color:#ffeb3b">黄色辅助延长线</span>, 用于检查与平台平行
   </div>
 </div>
 </div>
@@ -605,39 +692,70 @@ function draw2D() {
     ctx.moveTo(acx, acy-6); ctx.lineTo(acx, acy+6); ctx.stroke();
   }
 
-  // 画所有关键点
+  // 辅助延长线: 两个关键点的连线延长至全图, 便于检查与平台是否平行
+  if (keypoints.length >= 2) {
+    const p1 = keypoints[0].uv, p2 = keypoints[1].uv;
+    const dx = p2[0] - p1[0], dy = p2[1] - p1[1];
+    if (dx !== 0 || dy !== 0) {
+      // 求直线与 640x480 画布四边的参数 t, 延长到整图范围
+      const ts = [];
+      if (dx !== 0) { ts.push((0 - p1[0]) / dx, (640 - p1[0]) / dx); }
+      if (dy !== 0) { ts.push((0 - p1[1]) / dy, (480 - p1[1]) / dy); }
+      const tmin = Math.min(...ts), tmax = Math.max(...ts);
+      const x1 = (p1[0] + tmin * dx) * scale, y1 = (p1[1] + tmin * dy) * scale;
+      const x2 = (p1[0] + tmax * dx) * scale, y2 = (p1[1] + tmax * dy) * scale;
+      // 黑色衬底 + 黄色虚线, 任何背景下都可见
+      ctx.strokeStyle = 'rgba(0,0,0,0.65)';
+      ctx.lineWidth = 3;
+      ctx.setLineDash([10, 8]);
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,235,59,0.9)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  // 画所有关键点 — 精确十字星
   keypoints.forEach((kp, i) => {
     const cx = kp.uv[0] * scale, cy = kp.uv[1] * scale;
     const color = KP_COLORS[i % KP_COLORS.length];
-    const r = 9;
+    const arm = 5;  // 十字臂长
 
-    // 5x5 窗口
-    const halfPx = 2.5 * scale;
-    ctx.strokeStyle = 'rgba(255,255,0,0.5)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(cx - halfPx, cy - halfPx, halfPx * 2, halfPx * 2);
-
-    // 十字
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(cx - r, cy); ctx.lineTo(cx + r, cy);
-    ctx.moveTo(cx, cy - r); ctx.lineTo(cx, cy + r);
-    ctx.stroke();
-
-    // 实心圆
-    ctx.fillStyle = color;
-    ctx.beginPath(); ctx.arc(cx, cy, r * 0.6, 0, Math.PI * 2); ctx.fill();
+    // 外黑边 (让十字在任何背景下都可见)
     ctx.strokeStyle = '#000';
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(cx - arm, cy); ctx.lineTo(cx + arm, cy);
+    ctx.moveTo(cx, cy - arm); ctx.lineTo(cx, cy + arm);
     ctx.stroke();
 
-    // 编号
+    // 内彩色十字
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(cx - arm, cy); ctx.lineTo(cx + arm, cy);
+    ctx.moveTo(cx, cy - arm); ctx.lineTo(cx, cy + arm);
+    ctx.stroke();
+
+    // YOLO 伪标签用虚线十字区分
+    if (kp.label && kp.label.startsWith('YOLO')) {
+      ctx.strokeStyle = 'rgba(255,165,0,0.6)';
+      ctx.lineWidth = 3;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(cx - arm - 2, cy); ctx.lineTo(cx + arm + 2, cy);
+      ctx.moveTo(cx, cy - arm - 2); ctx.lineTo(cx, cy + arm + 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // 编号 (右上角小字)
     ctx.fillStyle = '#fff';
-    ctx.font = `bold ${Math.round(11 * scale)}px monospace`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(i + 1, cx, cy);
+    ctx.font = `bold 10px monospace`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText(i + 1, cx + arm + 2, cy - arm);
   });
 }
 
@@ -811,6 +929,16 @@ function updateInfoPanel() {
   document.getElementById('info-auto').textContent =
     `(${autoUV[0]}, ${autoUV[1]})` + (auto3D ? ' → ' + auto3D.map(Math.round).join(',') : '');
   document.getElementById('info-kp-count').textContent = keypoints.length;
+  // 辅助线角度: 前两个关键点连线相对水平方向的角度 (图像坐标, y 向下)
+  const guideEl = document.getElementById('info-guide');
+  if (keypoints.length >= 2) {
+    const [u1, v1] = keypoints[0].uv;
+    const [u2, v2] = keypoints[1].uv;
+    const deg = Math.atan2(v2 - v1, u2 - u1) * 180 / Math.PI;
+    guideEl.textContent = (deg >= 0 ? '+' : '') + deg.toFixed(1) + '°';
+  } else {
+    guideEl.textContent = '-';
+  }
   document.getElementById('frame-label').textContent = `${currentIdx + 1} / ${frames.length}`;
   document.getElementById('info-time').textContent = loadTimeMs + ' ms';
 }
@@ -983,26 +1111,46 @@ def main():
     parser = argparse.ArgumentParser(description="Shelf Anchor V2 — Web 批量审核")
     parser.add_argument("--data_dir", default="data/new_sheef/prototypes")
     parser.add_argument("--output_dir", default="data/new_sheef/prototype_annotations")
+    parser.add_argument("--yolo_labels_dir", default=None,
+                        help="YOLO labels directory (e.g. datasets/shelf_pose_pseudo/labels) — load pseudo-labels as initial keypoints")
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--host", default="0.0.0.0")
     # Camera
-    parser.add_argument("--fx", type=float, default=420.0)
-    parser.add_argument("--fy", type=float, default=420.0)
-    parser.add_argument("--cx", type=float, default=320.0)
-    parser.add_argument("--cy", type=float, default=240.0)
+    parser.add_argument("--fx", type=float, default=410.9)
+    parser.add_argument("--fy", type=float, default=410.9)
+    parser.add_argument("--cx", type=float, default=307.0)
+    parser.add_argument("--cy", type=float, default=264.3)
     parser.add_argument("--img_w", type=int, default=640)
     parser.add_argument("--img_h", type=int, default=480)
     args = parser.parse_args()
 
-    global DATA_DIR, OUTPUT_DIR, FX, FY, CX, CY, IMG_W, IMG_H
+    global DATA_DIR, OUTPUT_DIR, YOLO_LABELS_DIR, FX, FY, CX, CY, IMG_W, IMG_H
     DATA_DIR = args.data_dir
     OUTPUT_DIR = args.output_dir
+    YOLO_LABELS_DIR = args.yolo_labels_dir
     FX, FY, CX, CY = args.fx, args.fy, args.cx, args.cy
     IMG_W, IMG_H = args.img_w, args.img_h
 
     frames = _scan_frames(DATA_DIR)
     print(f"Found {len(frames)} frames in {DATA_DIR}")
+
+    # 如果指定了 YOLO labels dir，只显示有 YOLO 标签的帧
+    if YOLO_LABELS_DIR:
+        global FRAMES, STEMS
+        yolo_stems = set()
+        for split in ("train", "val"):
+            split_dir = os.path.join(YOLO_LABELS_DIR, split)
+            if os.path.isdir(split_dir):
+                for f in os.listdir(split_dir):
+                    if f.endswith(".txt"):
+                        yolo_stems.add(f.replace(".txt", ""))
+        STEMS = [s for s in STEMS if s in yolo_stems]
+        FRAMES = [f for f in FRAMES if f["stem"] in yolo_stems]
+        print(f"Filtered to {len(FRAMES)} frames with YOLO labels")
+
     print(f"Output: {OUTPUT_DIR}")
+    if YOLO_LABELS_DIR:
+        print(f"YOLO labels: {YOLO_LABELS_DIR} (pseudo-labels as initial keypoints)")
     print(f"\nOpen http://localhost:{args.port} in your browser")
     print(f"\nMulti-keypoint annotation:")
     print(f"  Left-click  — Add keypoint (auto PCD lookup)")
