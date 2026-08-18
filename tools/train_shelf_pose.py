@@ -169,7 +169,7 @@ def main():
     # Check dataset
     if not Path(args.data).exists():
         print(f"Dataset YAML not found: {args.data}")
-        print("Run: python tools/prepare_shelf_pose.py first")
+        print("Run: python tools/reviewed_to_train.py first")
         sys.exit(1)
 
     # Load model: continue from checkpoint if given, else pretrained weights
