@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """
-用最优 YOLO-pose 模型重新生成伪标签。
+用最优 YOLO-pose 模型重新生成伪标签（伪标签生成唯一入口）。
+
 直接调用 YOLO-pose 推理 + PCD 3D 查表，输出锚点同时含 pixel_uv 和 anchor_3d。
 
+合并来源:
+  - regenerate_pseudo_labels.py: 本脚本主体 (最优模型推理 + PCD 3D 查表)
+  - model_pseudo_label.py:       v4 旧模型版, 选帧逻辑已被本脚本覆盖, 已删除
+  - select_pseudo_labels.py:     DINOv2 聚类选帧, 匹配方案弃用, 已删除
+
 用法:
-  python tools/regenerate_pseudo_labels.py
-  python tools/regenerate_pseudo_labels.py --per_cluster 15 --conf 0.25
+  python tools/pseudo_labels.py
+  python tools/pseudo_labels.py --per_cluster 15 --conf 0.25
 """
 
 import argparse
