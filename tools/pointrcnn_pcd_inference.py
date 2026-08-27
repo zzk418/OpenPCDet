@@ -4,7 +4,7 @@ PointRCNN (Seg Head) 推理脚本 — 读取 PCD 点云文件并运行 PointRCNN
 用法:
     cd /code/OpenPCDet/tools
     python pointrcnn_pcd_inference.py \
-        --pcd_path ../data/new_sheef/pngs/TV_250000000001.pcd \
+        --pcd_path ../data/new_sheef/pngs/TV_250000017662.pcd \
         --cfg_file cfgs/kitti_models/pointrcnn.yaml \
         --ckpt ../checkpoints/pointrcnn_kitti.pth
 

@@ -34,8 +34,8 @@ BEST_MODEL = REPO / "output/shelf_pose_train/shelf_reviewed_v4/weights/best.pt"
 TARGET_CLUSTERS = {1, 3, 4, 5, 7, 9}
 
 # Camera (640x480 — same as training resolution)
-FX, FY = 420.0, 420.0
-CX, CY = 307.0, 264.0
+FX, FY = 392.67, 411.42
+CX, CY = 321.34, 236.55
 IMG_W, IMG_H = 640, 480
 
 

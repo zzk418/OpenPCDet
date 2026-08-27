@@ -3,7 +3,7 @@
 福州现场数据全量推理: YOLO-pose → PCD 点云深度查表 → 3D 锚点。
 
 福州数据的 TV_*.pcd 是相机坐标系稀疏深度点云 (x y z mm, ~20k 点, 覆盖 ~6% 像素),
-与 jpg 同帧同内参 (fx=fy=410.9, cx=307, cy=264.3)。pgm 深度图带 ~-1.09m 系统偏差,
+与 jpg 同帧同内参 (fx=392.67, fy=411.42, cx=321.34, cy=236.55)。pgm 深度图带 ~-1.09m 系统偏差,
 不可直接用于锚点查表, 故深度一律取自 PCD。
 
 查表规则: 关键点像素附近自适应窗口 (6px 起, 逐倍扩大至 64px), 取窗口内
@@ -26,7 +26,7 @@ BASE = REPO / "data/new_sheef/福州现场数据"
 MODEL_PT = REPO / "output/shelf_pose_train/shelf_v6_s_direct_aug_c2/weights/last.pt"
 OUTPUT_DIR = REPO / "output/shelf_pose_inference_v6s_fuzhou_conf50_pcd"
 
-FX, FY, CX, CY = 410.9, 410.9, 307.0, 264.3  # Eagle-M4 Mega 实测内参
+FX, FY, CX, CY = 392.67, 411.42, 321.34, 236.55  # Eagle-M4 Mega 出厂内参 (camera_intrinsics_E0BB6585B5893591.json)
 IMG_W, IMG_H = 640, 480
 CONF = 0.5
 Z_MIN_MM, Z_MAX_MM = 300.0, 8000.0

@@ -325,7 +325,7 @@ def visualize_segmentation(xyz_np, seg_probs, save_path="output/pointrcnn_seg_re
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--pcd', type=str,
-                        default='data/new_sheef/pngs/TV_250000000001.pcd')
+                        default='data/new_sheef/pngs/TV_250000017662.pcd')
     parser.add_argument('--num_points', type=int, default=16384)
     parser.add_argument('--output', type=str, default='output/pointrcnn_seg_quick.png')
     args = parser.parse_args()

@@ -2,8 +2,9 @@
 """用修正后的 Eagle-M4 Mega 内参重算标注 JSON 中的 anchor_3d。
 
 背景: 旧标注工具的 _get_anchor_3d 默认参数是 (cx=320, cy=240) —— 错误。
-正确的内参是 fx=fy=410.9, cx=307.0, cy=264.3 (fy/cy 由 PCD 射线网格实测,
-fx 取方形像素先验; 权威出厂值可用 tools/query_camera_intrinsics.py 从相机读取)。
+正确的内参是 fx=392.67, fy=411.42, cx=321.34, cy=236.55 (深度 640×480,
+由 tools/query_camera_intrinsics.py 从相机读取出厂值,
+见 output/rk3588_deploy/camera_intrinsics_E0BB6585B5893591.json)。
 
 像素点击 (pixel_uv) 保持不变, 只重算 3D 反投影值。
 
@@ -22,7 +23,7 @@ import sys
 
 import numpy as np
 
-FX, FY, CX, CY = 410.9, 410.9, 307.0, 264.3
+FX, FY, CX, CY = 392.67, 411.42, 321.34, 236.55
 IMG_W, IMG_H = 640, 480
 
 

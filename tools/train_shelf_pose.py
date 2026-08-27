@@ -20,6 +20,10 @@ Usage:
 
   # Standard ultralytics resume (all config from the run dir's args.yaml)
   python tools/train_shelf_pose.py --resume --ckpt output/shelf_pose_train/xxx/weights/last.pt
+
+  # Named continue-training preset (原 resume_shelf_pose.py 配置表, 已合并到本脚本)
+  python tools/train_shelf_pose.py --experiment night_c2
+  python tools/train_shelf_pose.py --experiment list
 """
 
 import argparse
@@ -32,6 +36,74 @@ from ultralytics.utils import SETTINGS
 SETTINGS["wandb"] = True
 
 from ultralytics import YOLO
+
+REPO = Path(__file__).resolve().parent.parent
+OUTPUT_ROOT = REPO / "output/shelf_pose_train"
+
+# 续训预设实验表 (合并自 resume_shelf_pose.py): 每轮差异仅在 起点权重/数据集/输出目录/epochs/lr0/patience/plots。
+# 用 `--experiment <名称>` 复现, `--experiment list` 打印全部。
+EXPERIMENTS = {
+    "v6_s_direct_aug_c2": dict(
+        ckpt="output/shelf_pose_train/shelf_v6_s_direct_aug/weights/best.pt",
+        data="datasets/shelf_pose_reviewed_aug/dataset.yaml",
+        name="shelf_v6_s_direct_aug_c2",
+        epochs=76, lr0=0.001, lrf=0.01, warmup_epochs=3, close_mosaic=10,
+        patience=15, plots=True,
+    ),
+    "night_c1": dict(
+        ckpt="output/shelf_pose_train/shelf_v6_s_direct_aug_c2/weights/last.pt",
+        data="datasets/shelf_pose_reviewed_aug_night/dataset.yaml",
+        name="shelf_v6_s_night_c1",
+        epochs=40, lr0=0.0005, lrf=0.01, warmup_epochs=2, close_mosaic=8,
+        patience=15, plots=True,
+    ),
+    "night_c2": dict(
+        ckpt="output/shelf_pose_train/shelf_v6_s_night_c1/weights/last.pt",
+        data="datasets/shelf_pose_reviewed_aug_night/dataset.yaml",
+        name="shelf_v6_s_night_c2",
+        epochs=40, lr0=0.0002, lrf=0.01, warmup_epochs=2, close_mosaic=8,
+        patience=15, plots=True,
+    ),
+    "e21_replay": dict(
+        ckpt="output/shelf_pose_train/shelf_v6_s_direct_aug/weights/best.pt",
+        data="datasets/shelf_pose_reviewed_aug/dataset.yaml",
+        name="shelf_v6_s_direct_aug_e21_replay",
+        epochs=21, lr0=0.001, lrf=0.01, warmup_epochs=3, close_mosaic=10,
+        patience=100, plots=False,  # 不早停, 必须跑满 21 复现 e21
+    ),
+}
+
+# 续训实验共享超参 (全部实验一致)
+COMMON = dict(
+    batch=8, imgsz=640, cos_lr=True, momentum=0.937, weight_decay=0.0005,
+    workers=2, device="0", exist_ok=True, seed=0, deterministic=True,
+    # 损失权重
+    kobj=5.0, cls=1.0, box=5.0, pose=15.0, dfl=1.5,
+    # 增强
+    hsv_h=0.01, hsv_s=0.2, hsv_v=0.15, degrees=3.0, translate=0.03,
+    scale=0.15, shear=0.5, fliplr=0.0, mosaic=0.3,
+    auto_augment="randaugment", erasing=0.4, nbs=64,
+)
+
+
+def run_experiment(name):
+    """按预设实验名续训: 加载起点权重, 用 COMMON + 该轮差异超参 train。"""
+    cfg = EXPERIMENTS[name]
+    ckpt = REPO / cfg["ckpt"]
+    data = REPO / cfg["data"]
+    if not ckpt.exists():
+        print(f"Start checkpoint not found: {ckpt}")
+        sys.exit(1)
+    if not data.exists():
+        print(f"Dataset YAML not found: {data}")
+        sys.exit(1)
+
+    print(f"Experiment '{name}': {cfg['ckpt']} -> {cfg['name']}")
+    model = YOLO(str(ckpt))
+    kwargs = dict(COMMON)
+    kwargs.update({k: v for k, v in cfg.items() if k not in ("ckpt", "data", "name")})
+    model.train(data=str(data), name=cfg["name"], project=str(OUTPUT_ROOT), **kwargs)
+    print("Done.")
 
 
 def parse_args():
@@ -71,6 +143,10 @@ def parse_args():
     parser.add_argument("--resume", action="store_true",
                         help="Standard ultralytics resume; requires --ckpt, "
                              "all other config comes from the run dir's args.yaml")
+    parser.add_argument("--experiment", default=None,
+                        choices=list(EXPERIMENTS) + ["list"],
+                        help="Named continue-training preset (merged resume_shelf_pose.py); "
+                             "'list' prints all")
     parser.add_argument("--set", dest="set_cfgs", default=None, nargs=argparse.REMAINDER,
                         help="Override hyperparams, e.g. --set kobj=5.0 cls=1.0 "
                              "auto_augment=randaugment")
@@ -151,6 +227,17 @@ def build_train_kwargs(args):
 
 def main():
     args = parse_args()
+
+    # Named continue-training preset (merged resume_shelf_pose.py)
+    if args.experiment == "list":
+        print("可用实验:")
+        for name, cfg in EXPERIMENTS.items():
+            print(f"  {name:22s} epochs={cfg['epochs']:3d} lr0={cfg['lr0']} -> {cfg['name']}")
+        print("用法: python tools/train_shelf_pose.py --experiment <实验名>")
+        return
+    if args.experiment:
+        run_experiment(args.experiment)
+        return
 
     # Standard resume: ultralytics reads everything from the run dir's args.yaml
     if args.resume:
