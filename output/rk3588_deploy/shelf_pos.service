@@ -1,0 +1,13 @@
+[Unit]
+Description=Shelf recognition service (货架识别: 监听触发 -> 推理 -> 回 pos -> Program_3 -> PLC)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/rk3588_deploy
+ExecStart=/usr/bin/python3 /root/rk3588_deploy/shelf_pos_service.py --ip 192.168.2.150
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

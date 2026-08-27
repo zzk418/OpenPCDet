@@ -6,6 +6,8 @@ datasets
 *.pt
 weights
 snapshot
+Program_3
+mobelnetv3
 
 **__pycache__**
 **/build/
@@ -22,5 +24,14 @@ venv/
 *.pkl
 *.zip
 *.bin
-output
+output/*
+!output/rk3588_deploy/
+output/rk3588_deploy/*.rknn
+output/rk3588_deploy/imgs/
+output/rk3588_deploy/MRDVS_linux/
+output/rk3588_deploy/log/
+output/rk3588_deploy/results/
+output/rk3588_deploy/results_fp16/
+!output/rk3588_deploy/*.sh
+*Zone.Identifier
 version.py

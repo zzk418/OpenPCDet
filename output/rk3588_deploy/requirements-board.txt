@@ -1,0 +1,13 @@
+# RK3588 板端运行依赖 (aarch64)
+#
+# 安装 (离线):
+#   bash install_offline.sh          # headless opencv (无显示, 推荐)
+# 或: pip install --no-index --find-links wheels_aarch64 -r requirements-board.txt
+#
+# 注意:
+#   - 板子装 rknn-toolkit-**lite2** (推理), 不是本目录里的 rknn-toolkit2 (PC 端转换用)
+#   - wheels_aarch64/ 已按板子 python3.8 (cp38) 打好; 若板子是 python3.10 需重新下 cp310
+#   - python 版本影响: numpy 3.8 下最高 1.24.4; opencv 5.x 在 py<3.9 需 numpy<2
+rknn-toolkit-lite2==2.3.2
+numpy
+opencv-python-headless
