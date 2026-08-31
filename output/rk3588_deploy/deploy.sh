@@ -41,4 +41,4 @@ echo
 echo "✔ 部署完成"
 echo "  服务状态:  systemctl status shelf_pos"
 echo "  运行日志:  journalctl -u shelf_pos -f"
-echo "  手动全量测: bash infer_int8.sh"
+echo "  手动全量测: bash infer_fp16.sh"

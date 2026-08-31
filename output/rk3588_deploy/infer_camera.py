@@ -7,9 +7,9 @@
     python infer_camera.py --cores 7 --json    # 三核 + 逐帧打印检测 JSON
     python infer_camera.py --save out.mp4      # 同时录制视频
 
-模型: shelf_v6_s_fgd_qat_int8.rknn (YOLOv8s-pose FGD 特征蒸馏版, 640x640, int8)
-输出: 三输出拆分版 box[1,4,8400] + conf[1,1,8400] + kpts[1,6,8400], decode_yolopose 内
-      merge_outputs 按 shape 合并回 [1,11,8400]。
+模型: shelf_v6_s_night_c2_fp16.rknn (YOLOv8s-pose 货架关键点, 640x640, fp16)
+输出: 单输出或三输出拆分版 (box[1,4,8400] + conf[1,1,8400] + kpts[1,6,8400]) 自动兼容,
+      decode_yolopose 内 merge_outputs 按 shape 合并回 [1,11,8400]。
 
 --json 模式逐帧向 stdout 打印一行 JSON, 便于上位机解析关键点像素坐标:
     {"t": 123.456, "fps": 28.3, "dets": [{"box": [...], "conf": 0.9,
@@ -31,9 +31,9 @@ import shelf_viz  # v4 风格绘制 (同 PC 端 infer_shelf_anchor)
 IMG_SIZE = 640          # 模型输入 640x640
 LETTERBOX_FILL = 114    # 与 ultralytics letterbox 一致
 N_KPTS = 2              # P1/P2 两个关键点
-CONF_SCALE = 256.0      # 旧手术版模型 conf 已 ×256; 当前拆分版 conf 原生 0~1 (解码按 >1.5 自动识别)
+CONF_SCALE = 256.0      # 旧手术版模型 conf 已 ×256; 生产 fp16 conf 原生 0~1 (解码按 >1.5 自动识别)
 DEFAULT_MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "shelf_v6_s_fgd_qat_int8.rknn")
+                             "shelf_v6_s_night_c2_fp16.rknn")
 
 
 # ═══════════════════════ 纯 numpy 预处理 ═══════════════════════
