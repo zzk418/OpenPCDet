@@ -6,25 +6,53 @@ YOLOv8s-pose 货架关键点模型 **FGD 特征蒸馏版** (`shelf_v6_s_fgd_qat_
 > 当前模型: 2026-08-21 FGD 特征蒸馏版 (yolov8x-pose 教师做特征 KD + 夜间域 100 张标定 int8)。
 > 强目标 conf **0.91~0.97** (int8 与 fp32 差 ≤0.02, 全场最高), test_neg 无误检, 关键点像素差 ≤6px。
 
+## 两行命令部署 (推荐)
+
+```bash
+# 行1 (PC): 把最小部署包拷到板子
+scp -r output/rk3588_deploy/ root@<板子IP>:/root/
+
+# 行2 (PC): 一键部署 (装依赖 → 装相机SDK → 注册自启服务 → 冒烟验证)
+ssh root@<板子IP> "cd /root/rk3588_deploy && sudo bash deploy.sh"
+```
+
+- `deploy.sh` 依次: ① 离线装 python 依赖 (wheelhouse, 无网) ② 装 MRDVS 相机 SDK (已装跳过)
+  ③ `install_shelf_service.sh` 注册开机自启 ④ 跑一张自带测试图冒烟验证。
+- 换相机 IP: `CAMERA_IP=192.168.2.x` (默认 `192.168.2.150`): `ssh root@<板IP> "cd /root/rk3588_deploy && CAMERA_IP=192.168.2.x sudo bash deploy.sh"`
+- 板子 python3 需与 `wheels_aarch64/` 匹配 (cp38); 版本不符时 [1/4] 步会直接报错。
+- 旧包残留想彻底清掉, 先 `ssh root@<板IP> "rm -rf /root/rk3588_deploy"` 再执行上面两行。
+
 ## 目录结构
 
 ```
-rk3588_deploy/                        # 最小推理包 (2026-08-21)
+rk3588_deploy/                        # 最小生产部署包 (2026-08-31)
 ├── shelf_v6_s_fgd_qat_int8.rknn    # NPU 模型 (13.9MB, int8, RK3588)  ★当前生产模型 (md5 bbf33174)
-├── shelf_viz.py                    # 可视化 + PCD 深度查表共用模块 (与 PC 端 infer_shelf_anchor 同款)
-├── infer_image.py                  # 离线推理: 图片/目录 → 关键点 + PCD 深度 3D 锚点 + 可视化
-├── infer_camera.py                 # 实时推理: 摄像头 → 关键点 + FPS (无 PCD, 2D)
-├── imgs/                           # 10 张真实常规测试帧 + 同名 .pcd (深度查表用)
-├── librknnrt.so                    # 配套 NPU 运行时 (7.4MB, 对应 rknn-toolkit-lite2 2.3.2)
-├── requirements-board.txt          # 板端依赖清单 (rknn-toolkit-lite2 + numpy + opencv)
+├── shelf_pos_service.py            # 生产服务: 监听触发→推理→回pos→PLC (systemd 自启)
+├── infer_camera_sdk.py             # SDK 相机实时推理 (生产服务用)
+├── infer_camera.py                 # letterbox/decode 核心 (被服务 import)
+├── infer_image.py                  # 离线推理: 图片→关键点 + PCD 深度 3D 锚点
+├── shelf_viz.py                    # 可视化 + PCD 深度查表共用模块
+├── query_camera_intrinsics.py      # 相机内参读取 (被服务 import)
+├── camera_intrinsics_E0BB6585B5893591.json  # 出厂内参 (按 SN 自动读)
+├── imgs/                           # 10 张自带测试帧 + 同名 .pcd (冒烟/自检)
+├── librknnrt.so                    # 配套 NPU 运行时 (7.4MB, rknn-toolkit-lite2 2.3.2)
+├── MRDVS_linux/                    # 蓝芯相机 SDK 安装包 (install.sh → /opt/MRDVS)
 ├── wheels_aarch64/                 # 板端离线 wheelhouse (aarch64, 无网安装用)
+├── requirements-board.txt          # 板端依赖清单 (rknn-toolkit-lite2 + numpy + opencv)
 ├── install_offline.sh              # 无网一键安装脚本 (headless opencv)
+├── install_shelf_service.sh        # 注册开机自启服务
+├── deploy.sh                       # ★ 一键部署 (PC 两行命令的第 2 行)
 └── README.md                       # 本文档
 ```
 
-> 📦 精简说明: 其余产物 (PTQ 备份、fp16、kl/split/qat_v3 实验模型, 标定集 `calib*/`,
-> 转换日志 `convert*.log`, dev 脚本 `_verify_x86.py`, 5 张边界用例测试图) 统一放
-> `output/rk3588_deploy_pre/`。
+> 📦 退役清单 (统一在 `output/rk3588_deploy.bak/retired_20260831/`): 旧模型
+> (`shelf_v6_s_night_c2_fp16.rknn` / `int8_hybrid.rknn`)、`infer_fp16.sh`、
+> dev 测试脚本 (`test_modbus_plc.py` / `test_rgbd_align.py`)、静态 `shelf_pos.service`
+> (服务文件由 `install_shelf_service.sh` 按实际目录动态生成)、实验报告
+> (`int8_calib_hybrid_report.md`)、完整 imgs 测试集 (`imgs_all/`)、推理产物
+> (`results*`)、`log/`。
+> 更早的实验产物 (PTQ 备份、kl/split/qat_v3 模型、标定集、转换日志、`_verify_x86.py`、
+> 5 张边界用例测试图) 在 `output/rk3588_deploy_pre/`。
 
 ## 模型输出说明 (三输出拆分)
 
@@ -83,6 +111,8 @@ bash infer_int8.sh
 ```
 
 ## 板端部署步骤 (RK3588, Ubuntu, python3.10)
+
+> 最快: 用上面的**两行命令** (scp + deploy.sh)。下面手动一步步的步骤保留作参考/排查。
 
 ```bash
 # 1. 拷贝部署包到板子

@@ -2,7 +2,7 @@
 # RK3588 板端推理脚本
 #
 # 用法:
-#   bash infer_int8.sh                            # 离线推理 imgs/ 全部测试图 (15张)
+#   bash infer_int8.sh                            # 离线推理 imgs/ 全部测试图 (10张)
 #   bash infer_int8.sh --single <图路径> [参数]   # 单张图, 如 --single imgs/test_night.jpg --out /root/results
 #   bash infer_int8.sh --camera [编号] [参数]     # 摄像头实时推理 (默认 /dev/video0), 需显示器弹窗
 #   bash infer_int8.sh --camera-json [编号]       # 摄像头实时推理, JSON 输出 (无显示/上位机)
