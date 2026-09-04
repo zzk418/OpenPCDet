@@ -5,13 +5,12 @@
     python infer_image.py                          # 默认模型/单图占位, 见参数
     python infer_image.py --input test.jpg
     python infer_image.py --input ./imgs/          # 目录
-    python infer_image.py --model shelf_v6_s_fgd_qat_int8.rknn --conf 0.25 --cores 3
+    python infer_image.py --model shelf_mobilenet_r2_fp16.rknn --conf 0.7 --cores 3
 
-模型: shelf_v6_s_fgd_qat_int8.rknn (YOLOv8s-pose FGD 特征蒸馏版, 640x640, int8)
-输出: 三输出拆分版 box[1,4,8400] + conf[1,1,8400] + kpts[1,6,8400]
-      (onnx_split_output.py 手术, conf 独占张量不再需要 ×256); decode_yolopose 内
-      merge_outputs 按 shape 合并回 [1,11,8400] = [box xywh(letterbox像素) | cls_conf |
-      kpt1_x,y,c | kpt2_x,y,c] × 8400。
+模型: shelf_mobilenet_r2_fp16.rknn (MobileNetV3-Large-pose, 640x640, fp16)
+输出: 单输出或三输出拆分版 (box[1,4,8400] + conf[1,1,8400] + kpts[1,6,8400]) 自动兼容;
+      decode_yolopose 内 merge_outputs 按 shape 合并回 [1,11,8400] = [box xywh(letterbox像素) |
+      cls_conf | kpt1_x,y,c | kpt2_x,y,c] × 8400。
 
 依赖: rknn-toolkit-lite2 (aarch64), numpy, opencv-python
 """
@@ -32,9 +31,9 @@ import shelf_viz  # PCD 深度查表 + v4 风格绘制 (同 PC 端 infer_shelf_a
 IMG_SIZE = 640          # 模型输入 640x640
 LETTERBOX_FILL = 114    # 与 ultralytics letterbox 一致
 N_KPTS = 2              # P1/P2 两个关键点
-CONF_SCALE = 256.0      # 旧手术版模型 conf 已 ×256; 当前拆分版 conf 原生 0~1 (解码按 >1.5 自动识别)
+CONF_SCALE = 256.0      # 旧手术版模型 conf 已 ×256; 生产 fp16 conf 原生 0~1 (解码按 >1.5 自动识别)
 DEFAULT_MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "shelf_v6_s_fgd_qat_int8.rknn")
+                             "shelf_mobilenet_r2_fp16.rknn")
 
 
 # ═══════════════════════ 纯 numpy 预处理 ═══════════════════════
@@ -106,7 +105,7 @@ def merge_outputs(outs):
     return np.asarray(outs)
 
 
-def decode_yolopose(output0, orig_shape, conf_thres=0.25, iou_thres=0.45,
+def decode_yolopose(output0, orig_shape, conf_thres=0.7, iou_thres=0.45,
                     n_kpts=N_KPTS):
     """[1,11,8400] → 检测列表 (坐标反 letterbox 回原图)。
 
@@ -195,7 +194,7 @@ def main():
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--input", default="./imgs",
                         help="单张图片路径或图片目录 (默认 ./imgs 测试图文件夹)")
-    parser.add_argument("--conf", type=float, default=0.25)
+    parser.add_argument("--conf", type=float, default=0.7)
     parser.add_argument("--iou", type=float, default=0.45)
     parser.add_argument("--cores", type=int, default=7,
                         help="NPU 核: 1=单核 3=双核 7=三核(默认) 0=自动")

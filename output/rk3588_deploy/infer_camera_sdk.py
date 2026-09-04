@@ -10,7 +10,7 @@
     python infer_camera_sdk.py
 
     # 指定相机
-    python infer_camera_sdk.py --ip 192.168.100.86
+    python infer_camera_sdk.py --ip 192.168.2.150
     python infer_camera_sdk.py --sn 519889C9A2A6468E
     python infer_camera_sdk.py --index 0
 
@@ -55,6 +55,17 @@ try:
 except ImportError:
     LxCamera = LX_STATE = LX_OPEN_MODE = LX_CAMERA_FEATURE = LX_RGBD_ALIGN_MODE = None
     LX_ALGORITHM_MODE = None
+
+
+class CameraOpenError(RuntimeError):
+    """open_camera 失败并携带 SDK 返回码.
+
+    继承 RuntimeError → 所有原来 except RuntimeError 的调用方不受影响;
+    需要区分错误类型的调用方(如重连逻辑识别独占锁 -9)读 .ret。
+    """
+    def __init__(self, msg, ret=None):
+        super().__init__(msg)
+        self.ret = ret
 
 
 def disable_builtin_algorithm(camera, handle):
@@ -106,7 +117,7 @@ def open_camera(dll_path, ip, sn, index):
 
     ret, handle, dev_info = camera.DcOpenDevice(mode, param)
     if ret != LX_STATE.LX_SUCCESS:
-        raise RuntimeError(f"DcOpenDevice({mode}, {param}) 失败: {ret}")
+        raise CameraOpenError(f"DcOpenDevice({mode}, {param}) 失败: {ret}", ret=ret)
     print(f"已打开: {_bstr(dev_info.name, '?')}  SN={_bstr(dev_info.sn, '?')}  "
           f"IP={_bstr(dev_info.ip)}")
     disable_builtin_algorithm(camera, handle)   # 关内置算法流, 否则和 rgb+depth 抢带宽
@@ -227,7 +238,7 @@ def main():
     parser.add_argument("--sn", default=None, help="相机序列号")
     parser.add_argument("--index", type=int, default=None, help="按序号打开 (0 起)")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=".rknn 模型路径")
-    parser.add_argument("--conf", type=float, default=0.25)
+    parser.add_argument("--conf", type=float, default=0.7)
     parser.add_argument("--iou", type=float, default=0.45)
     parser.add_argument("--cores", type=int, default=3,
                         help="NPU 核: 1=单核 3=双核(默认) 7=三核 0=自动")

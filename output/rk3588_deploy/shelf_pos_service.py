@@ -32,6 +32,8 @@ import argparse
 import glob
 import json
 import os
+import fcntl
+import signal
 import socket
 import threading
 import time
@@ -43,7 +45,7 @@ import numpy as np
 # ── 复用板端推理管线 (与 infer_camera_sdk.py / infer_image.py 完全一致) ──
 from infer_camera import letterbox, decode_yolopose, DEFAULT_MODEL
 from infer_camera_sdk import (
-    LX_STATE, LX_CAMERA_FEATURE,
+    LX_STATE, LX_CAMERA_FEATURE, CameraOpenError,
     open_camera, get_depth_intrinsics, setup_rgbd_align,
     build_sdk_depth_map, attach_anchor_3d, _bstr,
 )
@@ -59,6 +61,35 @@ SIGN_Z = -1.0    # pos[1]=Z 竖直:  Z = SIGN_Z * y   (相机 y 下为正 → �
 
 # --from-file 测试模式的数据文件
 CENTER_FILE = Path("/root/rk3588_deploy/center_xyz.json")
+
+# ── 相机鲁棒性参数 (断流自愈 / 干净释放) ─────────────────────────
+# 上电/重启连不上相机、或旧进程被杀后相机独占锁(-9)未释放 → 直接崩.
+# 口径: 启动带退避重试等锁释放; 运行中断流自动 释放→退避→重开; 退出务必 close
+# 干净释放 DcCloseDevice, 否则下次启动必撞 LX_E_CTRL_PERMISS_ERROR (-9).
+STARTUP_CONNECT_TIMEOUT_S = 60.0    # 启动最多等多久连上相机, 超时退出交 systemd 重启
+RECONNECT_BACKOFF0 = 1.0            # 重连退避初值 (秒)
+RECONNECT_BACKOFF_MAX = 15.0        # 重连退避上限 (秒)
+FRAME_STALE_SEC = 3.0               # 最新帧超过这么久 = 画面过期, 拒绝吐旧位姿
+STREAM_HARD_FAIL = 20               # 连续 N 次 RGB 拿不到 → 判流死触发重连
+LOCK_FILE = Path("/root/rk3588_deploy/shelf_pos_service.lock")
+
+# 持有已获取的 flock fd, 防止文件对象被 GC 提前关闭 → 进程存活期间锁才有效
+_LOCK_HOLDERS = []
+
+
+def acquire_single_instance(lock_file=LOCK_FILE):
+    # 单实例守护: 相机独占控制权同一时刻只给一个进程. flock 由内核在进程退出/被杀时
+    # 自动释放, 不会因残留锁文件卡死下次启动. 返回 fd 需持有到进程结束.
+    fd = open(lock_file, "w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        sys_exit(f"已有实例在运行 ({lock_file}) — 先停掉旧进程再启动, 否则抢相机独占锁(-9)")
+    fd.write(str(os.getpid()))
+    fd.flush()
+    _LOCK_HOLDERS.append(fd)      # 持有引用到进程结束 → flock 才一直生效
+    return fd
+
 
 
 def read_center_file(path):
@@ -243,7 +274,161 @@ def make_videos(out_dir, n):
 class ShelfEngine:
     """启动时一次性初始化 (模型+相机+深度), 每次触发现场推理出中心点."""
 
-    def __init__(self, cfg):
+    # ── 相机生命周期 (open / teardown / reconnect) ──
+    # 取帧线程是相机的唯一主人; 主线程只读缓存帧, 不直接碰相机句柄.
+
+    def _permiss_err(self, ret):
+        # 该返回码 = 相机独占控制权被占 (LX_E_CTRL_PERMISS_ERROR, -9)
+        return ret is not None and ret == getattr(LX_STATE, "LX_E_CTRL_PERMISS_ERROR", None)
+
+    def _teardown(self):
+        # 幂等释放流+设备句柄. 退出/重连前必调 → 设备独占锁(-9)不留到下次启动
+        cam, h = self.camera, self.handle
+        self.camera, self.handle, self._connected = None, None, False
+        if cam is not None and h is not None:
+            try:
+                cam.DcStopStream(h)
+            except Exception:
+                pass
+            try:
+                cam.DcCloseDevice(h)
+            except Exception:
+                pass
+            print("[cam] 相机流+设备句柄已释放", flush=True)
+
+    def _interrupted(self):
+        return self._stop or (self._abort is not None and self._abort())
+
+    def _open_once(self):
+        # 一次完整连接: 开相机→配 2D/3D 流→RGBD 对齐→帧同步→启流.
+        # 任一失败回滚已开的句柄再抛, 绝不把独占锁留在半开句柄上
+        dll = self.cfg.dll or find_sdk_lib()
+        if dll is None:
+            raise RuntimeError("找不到 LxCameraApi 动态库, 用 --dll 指定路径")
+        camera, handle, dev_info = open_camera(dll, self.cfg.ip, self.cfg.sn, self.cfg.index)
+        self._sn = self._sn or _bstr(getattr(dev_info, "sn", None), None)
+        try:
+            if camera.DcSetBoolValue(
+                    handle, LX_CAMERA_FEATURE.LX_BOOL_ENABLE_2D_STREAM, True) \
+                    != LX_STATE.LX_SUCCESS:
+                raise RuntimeError("开启 2D 流失败")
+            if camera.DcSetBoolValue(
+                    handle, LX_CAMERA_FEATURE.LX_BOOL_ENABLE_3D_DEPTH_STREAM, True) \
+                    != LX_STATE.LX_SUCCESS:
+                raise RuntimeError("开启 3D 深度流失败")
+            # RGBD 对齐 (DEPTH_TO_RGB) 失败会自动回退内参投影
+            self._aligned = setup_rgbd_align(camera, handle)
+            # RGB/深度帧同步必须无条件开, 否则多路流不同步 → 频繁 FRAME_ID_NOT_MATCH
+            if camera.DcSetBoolValue(handle, LX_CAMERA_FEATURE.LX_BOOL_ENABLE_SYNC_FRAME, True) \
+                    == LX_STATE.LX_SUCCESS:
+                print("[sync] 已强制 RGB/深度帧同步 (ENABLE_SYNC_FRAME)", flush=True)
+            else:
+                print("[warn] 强制帧同步设置失败 → 靠取帧重试兜底", flush=True)
+            # 深度内参只在第一次连时在线查, 重连(同 SN)直接用缓存
+            if self.depth_intr is None:
+                self.depth_intr = get_depth_intrinsics(camera, handle, self.cfg.intrinsics,
+                                                       self._sn)
+                if self.depth_intr is not None:
+                    fx, fy, cx, cy = self.depth_intr
+                    print(f"深度内参: fx={fx:.3f} fy={fy:.3f} "
+                          f"cx={cx:.3f} cy={cy:.3f}", flush=True)
+                else:
+                    print("[warn] 拿不到深度内参, 对齐不可用时无法内参投影回退", flush=True)
+            self._start_stream(camera, handle)
+            self.camera, self.handle, self._connected = camera, handle, True
+            self._hard_fail = 0
+            print(f"[cam] 相机已连接 SN={self._sn or '?'}", flush=True)
+        except Exception:
+            # 半开状态回滚, 避免句柄泄漏占着相机独占锁
+            try:
+                camera.DcStopStream(handle)
+            except Exception:
+                pass
+            try:
+                camera.DcCloseDevice(handle)
+            except Exception:
+                pass
+            raise
+
+    def _start_stream(self, camera, handle):
+        # 常开(WORK_FOREVER)模式下相机自己已在流中, 再 DcStartStream 会失败 → 跳过
+        wm_mode = None
+        try:
+            from LxCameraSDK.lx_camera_define import LX_CAMERA_WORK_MODE
+            wm_mode = LX_CAMERA_WORK_MODE
+        except ImportError:
+            pass
+        already_streaming = False
+        if wm_mode is not None:
+            st_wm, wm = camera.DcGetIntValue(handle, LX_CAMERA_FEATURE.LX_INT_WORK_MODE)
+            if st_wm == LX_STATE.LX_SUCCESS and \
+                    wm.cur_value == wm_mode.WORK_FOREVER.value:
+                already_streaming = True
+        if already_streaming:
+            print("[stream] 相机常开(WORK_FOREVER), 已在流中, 跳过 DcStartStream", flush=True)
+            return
+        # NOT_RECEIVE_STREAM: 相机上一会话没收干净/带宽不足, 相机要一两秒恢复 → 重试
+        ret_start = camera.DcStartStream(handle)
+        if ret_start != LX_STATE.LX_SUCCESS:
+            time.sleep(1.0)
+            ret_start = camera.DcStartStream(handle)
+        if ret_start != LX_STATE.LX_SUCCESS:
+            err = getattr(camera, "DcGetErrorString", lambda r: "?")(ret_start)
+            raise RuntimeError(f"DcStartStream 失败: {ret_start} ({err})")
+
+    def _connect(self, initial):
+        # 连相机带退避重试: -9 独占锁/网络未就绪都要等设备自己恢复, 不能死循环硬抢.
+        # 启动(initial=True) 限时 STARTUP_CONNECT_TIMEOUT_S, 超时抛给上层退出(交 systemd 重启);
+        # 运行中重连(initial=False) 无限重试直到 _stop/abort.
+        backoff = RECONNECT_BACKOFF0
+        t0 = time.time()
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                self._open_once()
+                if self._interrupted():      # 刚连上就收到退出 → 别占着相机
+                    self._teardown()
+                    raise RuntimeError("连接期间收到退出信号")
+                return
+            except CameraOpenError as e:
+                if self._permiss_err(e.ret):
+                    why = "相机被占用(独占锁未释放), 等待设备自动恢复"
+                else:
+                    why = f"打开失败 ret={e.ret}" if e.ret is not None else str(e)
+                print(f"[cam] 第 {attempt} 次连相机失败: {why}", flush=True)
+            except RuntimeError as e:
+                print(f"[cam] 第 {attempt} 次连相机失败: {e}", flush=True)
+            if self._interrupted():
+                raise RuntimeError("收到退出信号, 中断连接重试")
+            if initial and time.time() - t0 > STARTUP_CONNECT_TIMEOUT_S:
+                raise RuntimeError(
+                    f"启动 {int(STARTUP_CONNECT_TIMEOUT_S)}s 内连不上相机, 退出待重启")
+            # 0.25s 分片睡, 让 Ctrl+C / SIGTERM 能及时打断退避
+            for _ in range(int(backoff * 4)):
+                if self._interrupted():
+                    raise RuntimeError("收到退出信号, 中断连接重试")
+                time.sleep(0.25)
+            backoff = min(backoff * 2.0, RECONNECT_BACKOFF_MAX)
+
+    def __init__(self, cfg, abort=None):
+        # abort: 无参可调用, 返回真时中断连接重试 (SIGTERM / 手动中断)
+        self.cfg = cfg
+        self._abort = abort
+        self._stop = False
+        self._lock = threading.Lock()   # 触发连发时串行化推理
+        self.camera = self.handle = None
+        self._connected = False
+        self._sn = None
+        self.depth_intr = None
+        self._aligned = False
+        self._grab_err = ""
+        self._latest = None             # (rgb, points) 最新帧缓存
+        self._latest_t = 0.0            # 缓存帧时间戳 (新鲜度/过期判断)
+        self._hard_fail = 0             # 连续取帧失败计数 (>= STREAM_HARD_FAIL 触发重连)
+        self._dumped = 0
+        self.rknn = None
+
         # ── RKNN 模型 ──
         from rknnlite.api import RKNNLite
         rknn = RKNNLite()
@@ -253,113 +438,92 @@ class ShelfEngine:
             raise RuntimeError(f"init_runtime 失败 (cores={cfg.cores})")
         self.rknn = rknn
 
-        # ── 相机 (LxCamera SDK, 自动发现 / --ip / --sn / --index) ──
-        dll = cfg.dll or find_sdk_lib()
-        if dll is None:
-            raise RuntimeError("找不到 LxCameraApi 动态库, 用 --dll 指定路径")
-        self.camera, self.handle, dev_info = open_camera(dll, cfg.ip, cfg.sn, cfg.index)
-        self.sn = _bstr(getattr(dev_info, "sn", None), None)
-
-        # 2D 流 (必) + 3D 深度流 (货架 3D 必需)
-        if self.camera.DcSetBoolValue(
-                self.handle, LX_CAMERA_FEATURE.LX_BOOL_ENABLE_2D_STREAM, True) \
-                != LX_STATE.LX_SUCCESS:
-            raise RuntimeError("开启 2D 流失败")
-        if self.camera.DcSetBoolValue(
-                self.handle, LX_CAMERA_FEATURE.LX_BOOL_ENABLE_3D_DEPTH_STREAM, True) \
-                != LX_STATE.LX_SUCCESS:
-            raise RuntimeError("开启 3D 深度流失败")
-        # RGBD 对齐 (DEPTH_TO_RGB) 失败会自动回退内参投影; 但同步帧必须无条件开,
-        # 否则多路流帧不同步 → getFrame 频繁报 FRAME_ID_NOT_MATCH
-        self._aligned = setup_rgbd_align(self.camera, self.handle)
-        sync_ret = self.camera.DcSetBoolValue(
-            self.handle, LX_CAMERA_FEATURE.LX_BOOL_ENABLE_SYNC_FRAME, True)
-        if sync_ret == LX_STATE.LX_SUCCESS:
-            print("[sync] 已强制 RGB/深度帧同步 (ENABLE_SYNC_FRAME)", flush=True)
-        else:
-            print(f"[warn] 强制帧同步设置失败({sync_ret}) → 靠取帧重试兜底", flush=True)
-
-        self.depth_intr = get_depth_intrinsics(self.camera, self.handle,
-                                               cfg.intrinsics, self.sn)
-        if self.depth_intr is not None:
-            print(f"深度内参: fx={self.depth_intr[0]:.3f} fy={self.depth_intr[1]:.3f} "
-                  f"cx={self.depth_intr[2]:.3f} cy={self.depth_intr[3]:.3f}", flush=True)
-        else:
-            print("[warn] 拿不到深度内参, 对齐不可用时无法内参投影回退", flush=True)
-
-        # 常开(WORK_FOREVER)模式下相机自己已经在流中, 再 DcStartStream 会失败 → 跳过
-        wm_mode = None
         try:
-            from LxCameraSDK.lx_camera_define import LX_CAMERA_WORK_MODE
-            wm_mode = LX_CAMERA_WORK_MODE
-        except ImportError:
-            pass
-        already_streaming = False
-        if wm_mode is not None:
-            st_wm, wm = self.camera.DcGetIntValue(
-                self.handle, LX_CAMERA_FEATURE.LX_INT_WORK_MODE)
-            if st_wm == LX_STATE.LX_SUCCESS and \
-                    wm.cur_value == wm_mode.WORK_FOREVER.value:
-                already_streaming = True
-        if already_streaming:
-            print("[stream] 相机常开(WORK_FOREVER), 已在流中, 跳过 DcStartStream", flush=True)
-        else:
-            # NOT_RECEIVE_STREAM: 相机上一会话没收干净/带宽不足, 相机要一两秒恢复 → 重试
-            ret_start = self.camera.DcStartStream(self.handle)
-            if ret_start != LX_STATE.LX_SUCCESS:
-                time.sleep(1.0)
-                ret_start = self.camera.DcStartStream(self.handle)
-            if ret_start != LX_STATE.LX_SUCCESS:
-                err = getattr(self.camera, "DcGetErrorString", lambda r: "?")(ret_start)
-                raise RuntimeError(f"DcStartStream 失败: {ret_start} ({err})")
-
-        self.cfg = cfg
-        self._lock = threading.Lock()   # 触发连发时串行化推理
-
-        # 后台常驻取帧线程: SDK 的 happy path 就是连续消费, 这样 RGB/深度始终同步,
-        # 触发时直接用最新缓存帧, 不会因"空闲很久才取一帧"撞上 FRAME_ID_NOT_MATCH
-        self._latest = None
-        self._grab_err = ""
-        self._stop = False
-        self._dumped = 0                # --dump-frames 已保存帧数
-        self._grab_thread = threading.Thread(target=self._grab_loop, daemon=True)
-        self._grab_thread.start()
-        t0 = time.time()
-        while self._latest is None and time.time() - t0 < 5:
-            time.sleep(0.05)
-        if self._latest is None:
-            raise RuntimeError(f"5 秒内没取到帧: {self._grab_err or '取帧线程未就绪'}")
+            # 相机: 启动即带退避重试 (等上电网络就绪 / 设备独占锁 -9 释放)
+            self._connect(initial=True)
+            # 后台常驻取帧线程: 连续消费 RGB+深度保持同步; 断流自动 释放→退避→重开
+            self._grab_thread = threading.Thread(target=self._grab_loop, daemon=True)
+            self._grab_thread.start()
+            t0 = time.time()
+            while self._latest is None and time.time() - t0 < 10 \
+                    and not self._interrupted():
+                time.sleep(0.05)
+            if self._latest is None:
+                if self._interrupted():
+                    raise RuntimeError("启动中断: 收到退出信号, 还没等到首帧")
+                raise RuntimeError(
+                    f"连上相机但 10 秒内没取到帧: {self._grab_err or '取帧线程未就绪'}")
+        except (KeyboardInterrupt, RuntimeError):
+            # 半途失败务必清场, 否则相机独占锁/RKNN 会留给下一个实例 → 下次启动撞 -9
+            self._stop = True
+            self._teardown()
+            try:
+                if self.rknn is not None:
+                    self.rknn.release()
+                    self.rknn = None
+            except Exception:
+                pass
+            raise
 
     def _grab_loop(self):
-        """后台持续取最新 RGB+点云 (不推理, 只保持缓存最新且同步)."""
+        # 后台取帧线程 = 相机的唯一主人. 三态流转:
+        #   connected: 持续取最新 RGB+点云
+        #   _connected=False: 进 _connect 退避重连; 重连期间主线程 infer_once 因
+        #                    画面过期报错(宁错不给旧位姿), 重连成功自动恢复
         while not self._stop:
+            if not self._connected:
+                try:
+                    self._connect(initial=False)
+                except RuntimeError:
+                    continue                       # 退出信号/中断 → 外层 while 判 _stop
+                if self._stop:
+                    break
             try:
-                data_ptr = self._grab_frame(max_try=6)
-                ret, rgb = self.camera.getRGBImage(data_ptr)
-                if ret != LX_STATE.LX_SUCCESS or rgb is None:
-                    continue
-                rgb = np.ascontiguousarray(rgb.copy())   # 脱离 SDK 缓冲
-                if rgb.ndim == 3 and rgb.shape[2] == 1:
-                    rgb = cv2.cvtColor(rgb, cv2.COLOR_GRAY2BGR)
-                if self.cfg.color == "rgb":
-                    rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-                points = None
-                state, points = self.camera.getPointCloud(self.handle)
-                if state != LX_STATE.LX_SUCCESS or points is None or points.size == 0:
-                    points = None
-                self._latest = (rgb, points)
-                # --dump-frames: 前 N 帧存两模态 (RGB+点云) 供核对输入对不对
-                if self.cfg.dump_frames and self._dumped < self.cfg.dump_frames:
-                    try:
-                        save_aligned_frame(self.cfg.dump_dir, self._dumped, rgb, points)
-                        self._dumped += 1
-                        if self._dumped == self.cfg.dump_frames and self.cfg.dump_frames >= 2:
-                            make_videos(self.cfg.dump_dir, self.cfg.dump_frames)
-                    except Exception as e:
-                        print(f"[dump] 保存失败: {e}", flush=True)
+                self._read_one_frame()
             except Exception as e:
+                # 取帧失败/句柄竞态等一律视为流异常 → 释放后重连, 不让取帧线程死掉
                 self._grab_err = str(e)
-                time.sleep(0.05)
+                print(f"[cam] 取帧异常, 触发重连: {e}", flush=True)
+                self._teardown()
+            time.sleep(0.01)
+
+    def _read_one_frame(self):
+        # 取一帧 RGB+点云 → 更新 _latest (带时间戳). True=有新帧; False=瞬时丢帧.
+        # 连续 STREAM_HARD_FAIL 次 RGB 失败, 或 _grab_frame 抛真错误 → 抛错触发重连
+        data_ptr = self._grab_frame(max_try=6)   # 帧同步类临时错内部已重试
+        ret, rgb = self.camera.getRGBImage(data_ptr)
+        if ret != LX_STATE.LX_SUCCESS or rgb is None:
+            self._hard_fail += 1
+            if self._hard_fail >= STREAM_HARD_FAIL:
+                raise RuntimeError(f"连续 {self._hard_fail} 次 RGB 解码失败")
+            time.sleep(0.03)
+            return False
+        rgb = np.ascontiguousarray(rgb.copy())   # 脱离 SDK 缓冲 (下次 getFrame 会被复用)
+        if rgb.ndim == 3 and rgb.shape[2] == 1:
+            rgb = cv2.cvtColor(rgb, cv2.COLOR_GRAY2BGR)
+        if self.cfg.color == "rgb":              # SDK 若是 RGB 顺序, 转回 BGR 对齐推理管线
+            rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        # 3D 点云短时拿不到只置 None (RGB 才是必保流), 不算致命
+        points = None
+        try:
+            state, points = self.camera.getPointCloud(self.handle)
+            if state != LX_STATE.LX_SUCCESS or points is None or points.size == 0:
+                points = None
+        except Exception:
+            points = None
+        self._hard_fail = 0
+        self._latest = (rgb, points)
+        self._latest_t = time.time()
+        # --dump-frames: 前 N 帧存两模态 (RGB+点云) 供核对输入对不对
+        if self.cfg.dump_frames and self._dumped < self.cfg.dump_frames:
+            try:
+                save_aligned_frame(self.cfg.dump_dir, self._dumped, rgb, points)
+                self._dumped += 1
+                if self._dumped == self.cfg.dump_frames and self.cfg.dump_frames >= 2:
+                    make_videos(self.cfg.dump_dir, self.cfg.dump_frames)
+            except Exception as e:
+                print(f"[dump] 保存失败: {e}", flush=True)
+        return True
 
     def _grab_frame(self, max_try=8):
         """取一帧 RGB. FRAME_ID_NOT_MATCH(帧不同步)/MULTI_MACHINE 是临时错误,
@@ -430,14 +594,19 @@ class ShelfEngine:
         return [float(v) for v in center]
 
     def infer_once(self):
-        """用后台线程缓存的最新帧 → 推理 → 货架中心点 XYZ (相机系, mm)."""
+        # 用后台线程缓存的最新帧 → 推理 → 货架中心点 XYZ (相机系, mm).
+        # 画面过期(断流/重连中) → 抛错, 上层 handle_client 回 error_code=-1, 宁错不给旧位姿
         with self._lock:
             latest = self._latest
             if latest is None:
                 raise RuntimeError(f"取帧线程还没就绪: {self._grab_err or '未知'}")
             rgb, points = latest
+            age = time.time() - self._latest_t
+        if age > FRAME_STALE_SEC:
+            raise RuntimeError(
+                f"相机画面已过期 {age:.0f}s (取帧中断/重连中), 拒绝用旧帧推理")
         return self._infer_on(self.rknn, rgb, points, self.depth_intr, self.cfg)
-
+    
     def get_shelf_center_xyz(self):
         """★核心插桩点★: 返回货架中心点相机系 3D [x, y, z] (mm).
         默认=现场推理; --from-file 时读文件 (测试)."""
@@ -446,21 +615,19 @@ class ShelfEngine:
         return self.infer_once()
 
     def close(self):
+        # 停止取帧线程并释放相机/RKNN. 保证 DcCloseDevice → 下次启动不撞独占锁 -9.
+        # systemd 停服务若不干净 close, 设备侧锁要几十秒才自动释放 → 下一个实例直接 -9
         self._stop = True
+        self._teardown()
+        th = getattr(self, "_grab_thread", None)
+        if th is not None and th.is_alive():
+            th.join(timeout=2.0)       # 别让取帧线程在 close 后还碰相机
         try:
-            self.camera.DcStopStream(self.handle)
+            if self.rknn is not None:
+                self.rknn.release()
+                self.rknn = None
         except Exception:
             pass
-        try:
-            self.camera.DcCloseDevice(self.handle)
-        except Exception:
-            pass
-        try:
-            self.rknn.release()
-        except Exception:
-            pass
-
-
 def to_pos(xyz):
     """相机系 [x,y,z] → 内置算法 pos[Y,Z,X,angle] JSON 字符串."""
     x, y, z = xyz
@@ -523,7 +690,7 @@ def main():
     ap.add_argument("--index", type=int, default=None, help="按序号打开 (0 起)")
     ap.add_argument("--dll", default=None, help="LxCameraApi 动态库路径 (默认自动查找)")
     ap.add_argument("--model", default=DEFAULT_MODEL, help=".rknn 模型路径")
-    ap.add_argument("--conf", type=float, default=0.25)
+    ap.add_argument("--conf", type=float, default=0.7)
     ap.add_argument("--iou", type=float, default=0.45)
     ap.add_argument("--cores", type=int, default=3,
                     help="NPU 核: 1=单核 3=双核(默认) 7=三核 0=自动")
@@ -547,6 +714,16 @@ def main():
         sys_exit("--self-test 与 --from-file 不能同时用")
     if bool(args.image) != bool(args.pcd):
         sys_exit("--image 和 --pcd 必须成对给 (jpg + pcd, 如 imgs/TV_xxx.jpg + imgs/TV_xxx.pcd)")
+
+    # 停止信号: SIGTERM → 置位, 主循环干净退出 → finally 里 close() 释放相机独占锁.
+    # (SIGINT 不接管, Ctrl+C 仍走 KeyboardInterrupt 原路径)
+    _STOP = threading.Event()
+
+    def _on_sigterm(sig, frm):
+        print("\n[SIGTERM] 收到停止信号, 正在释放相机退出…", flush=True)
+        _STOP.set()
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
 
     engine = None
     if not args.from_file:
@@ -592,7 +769,18 @@ def main():
             finally:
                 rknn.release()
             return
-        engine = ShelfEngine(args)
+        # 单实例守护 + 启动引擎 (相机连接自带退避重试)
+        acquire_single_instance()   # 重复拉起会抢相机独占锁(-9)
+        try:
+            engine = ShelfEngine(args, abort=_STOP.is_set)
+        except KeyboardInterrupt:
+            if engine is not None:
+                engine.close()
+            print("已取消。", flush=True)
+            sys.exit(130)
+        except RuntimeError as e:
+            print(f"[fatal] {e}", flush=True)
+            sys.exit(1)
         if args.self_test:
             try:
                 xyz = engine.infer_once()
@@ -625,11 +813,18 @@ def main():
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((args.host, args.port))
     srv.listen(8)
+    srv.settimeout(1.0)              # 每秒醒来查一次退出信号 (SIGTERM 干净退出)
     print(f"货架识别服务监听 {args.host}:{args.port} (协议: 内置算法同款)", flush=True)
     print("触发 → 现场推理 → 回 pos → Program_3 写 Modbus 14~17 → 运控/PLC", flush=True)
+    print("相机: 断流自动重连; Ctrl+C / SIGTERM 干净退出并释放相机独占锁", flush=True)
     try:
-        while True:
-            conn, addr = srv.accept()
+        while not _STOP.is_set():
+            try:
+                conn, addr = srv.accept()
+            except socket.timeout:
+                continue             # accept 超时 → 回 while 判 _STOP
+            except OSError:
+                break
             print(f"[连接] {addr}", flush=True)
             threading.Thread(target=handle_client, args=(conn, get_xyz, args),
                              daemon=True).start()
