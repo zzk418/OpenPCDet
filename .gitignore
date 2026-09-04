@@ -33,5 +33,6 @@ output/rk3588_deploy/log/
 output/rk3588_deploy/results/
 output/rk3588_deploy/results_fp16/
 !output/rk3588_deploy/*.sh
+output/rk3588_deploy/wheels_aarch64/
 *Zone.Identifier
 version.py
