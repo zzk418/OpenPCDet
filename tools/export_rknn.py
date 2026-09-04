@@ -206,10 +206,13 @@ def main():
         mean_values=[[0, 0, 0]],
         std_values=[[255, 255, 255]],
         target_platform=args.target,
-        quantized_algorithm=args.algo if args.quant == 'int8' else None,
-        quantized_method=args.method,
         quant_img_RGB2BGR=True,   # 标定加载 BGR->RGB, 与部署 infer_image.py 一致
     )
+    if args.quant == 'int8':
+        # fp16 不量化: 不传 quantized_algorithm/method
+        # (rknn-toolkit2 2.3.2 config() 拒绝 quantized_algorithm=None)
+        cfg['quantized_algorithm'] = args.algo
+        cfg['quantized_method'] = args.method
     if args.auto_hybrid_cos_thresh is not None:
         cfg['auto_hybrid_cos_thresh'] = args.auto_hybrid_cos_thresh
         print(f'  auto_hybrid_cos_thresh={args.auto_hybrid_cos_thresh}')

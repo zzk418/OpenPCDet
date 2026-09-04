@@ -498,7 +498,7 @@ def main():
     parser.add_argument("--output_dir", default="output/shelf_anchor_v2_pred")
     parser.add_argument("--stem", default=None)
     parser.add_argument("--batch", action="store_true")
-    parser.add_argument("--conf", type=float, default=0.2)
+    parser.add_argument("--conf", type=float, default=0.7)
     parser.add_argument("--device", default="cuda:0")
     # Camera
     parser.add_argument("--fx", type=float, default=392.67)
