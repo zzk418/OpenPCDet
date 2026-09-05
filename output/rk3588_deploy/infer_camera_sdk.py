@@ -10,18 +10,22 @@
     python infer_camera_sdk.py
 
     # 指定相机
-    python infer_camera_sdk.py --ip 192.168.2.150
+    python infer_camera_sdk.py --ip 192.168.2.151
     python infer_camera_sdk.py --sn 519889C9A2A6468E
     python infer_camera_sdk.py --index 0
 
-    # 逐帧 JSON 给上位机 / 无显示纯推理 / 录制
+    # 逐帧 JSON 给上位机 / 无显示纯推理
     python infer_camera_sdk.py --json --no-display
-    python infer_camera_sdk.py --save out.mp4
 
-    # 打开 3D 深度流, 关键点做深度查表出 anchor_3d (同离线 infer_image, 需相机支持)
-    # 自动开启 SDK RGBD 对齐 (DEPTH_TO_RGB): 点云与 RGB 同分辨率同索引, 关键点像素直接查,
-    # 缺失像素局部窗口邻域采样; 对齐不可用时内参投影回退 (内参按 SN 自动读 camera_intrinsics_<sn>.json)
-    python infer_camera_sdk.py --depth3d
+    # 在线推理默认开 3D 深度流 → 关键点深度查表出 anchor_3d + 中心 xyz (同离线
+    # infer_image, 需相机支持): 自动开 SDK RGBD 对齐 (DEPTH_TO_RGB), 点云与 RGB
+    # 同分辨率同索引, 关键点像素直接查, 缺失像素局部窗口邻域采样; 对齐不可用时
+    # 内参投影回退 (内参按 SN 自动读 camera_intrinsics_<sn>.json)
+    python infer_camera_sdk.py
+
+    # 只开 2D (xyz 恒空)  /  检测到货架就抓拍带 XYZ 的推理帧 (默认脚本同目录 snaps/)
+    python infer_camera_sdk.py --no-depth3d
+    python infer_camera_sdk.py --snap-dir /root/rk3588_deploy/snaps --snap-gap 1.0
 
 依赖: rknn-toolkit-lite2 (aarch64), numpy, opencv-python,
       lx_camera_py-1.3.3 wheel + SDK 动态库 (install.sh 装到 /opt/MRDVS/lib)
@@ -245,15 +249,20 @@ def main():
     parser.add_argument("--color", choices=["bgr", "rgb"], default="bgr",
                         help="SDK RGB 流通道顺序 (示例程序直接 imshow 不作转换, 默认 bgr; "
                              "若画面偏蓝/偏橙改 --color rgb)")
-    parser.add_argument("--depth3d", action="store_true",
-                        help="同时开 3D 深度流, 关键点深度查表出 anchor_3d "
+    parser.add_argument("--no-depth3d", action="store_true",
+                        help="不开 3D 深度流 (仅 2D, xyz 恒空). 在线默认开深度流 → "
+                             "关键点深度查表出 anchor_3d/中心 xyz "
                              "(SDK RGBD 对齐点云优先, 内参投影回退)")
     parser.add_argument("--intrinsics", default=None,
                         help="深度内参 JSON (query_camera_intrinsics.py 输出); "
                              "缺省按相机 SN 自动找 camera_intrinsics_<sn>.json, 再在线查询")
     parser.add_argument("--json", action="store_true", help="逐帧向 stdout 打印检测 JSON")
     parser.add_argument("--no-display", action="store_true", help="无显示环境纯推理")
-    parser.add_argument("--save", default=None, help="录制视频到 <path> (如 out.mp4)")
+    parser.add_argument("--snap-dir", default=None,
+                        help="抓拍目录 (默认脚本同目录 snaps/). 检测到货架时把带关键点+XYZ"
+                             "的推理帧存成 snap_<时间>.jpg; 传空串关闭抓拍")
+    parser.add_argument("--snap-gap", type=float, default=1.0,
+                        help="同目标连续抓拍最小间隔秒 (防爆量, 默认 1.0)")
     args = parser.parse_args()
 
     if not os.path.exists(args.model):
@@ -261,6 +270,20 @@ def main():
     dll_path = args.dll or find_sdk_lib()
     if dll_path is None:
         sys.exit("找不到 LxCameraApi 动态库, 请用 --dll 指定路径")
+
+    # ── headless 显示探测 ──
+    # opencv 无 GUI 后端(或没 DISPLAY)时 imshow/destroyAllWindows 是空桩, 一调即抛
+    # cv2.error → 探测一次失败就整段关闭窗口逻辑, 只留抓拍/JSON/纯推理.
+    gui = not args.no_display
+    if gui:
+        try:
+            cv2.namedWindow("MRDVS Shelf Pose")
+            cv2.destroyWindow("MRDVS Shelf Pose")
+        except cv2.error as e:
+            gui = False
+            print(f"[warn] 无显示环境 (headless), 已关闭实时窗口; "
+                  f"看结果用抓拍图(--snap-dir)/--json: {str(e).splitlines()[0]}",
+                  flush=True)
 
     # ── NPU 模型 (与 infer_camera.py 相同) ──
     from rknnlite.api import RKNNLite
@@ -278,7 +301,7 @@ def main():
     if camera.DcSetBoolValue(handle, LX_CAMERA_FEATURE.LX_BOOL_ENABLE_2D_STREAM, True) \
             != LX_STATE.LX_SUCCESS:
         sys.exit("开启 2D 流失败 (LX_BOOL_ENABLE_2D_STREAM)")
-    if args.depth3d:
+    if not args.no_depth3d:
         if camera.DcSetBoolValue(handle, LX_CAMERA_FEATURE.LX_BOOL_ENABLE_3D_DEPTH_STREAM, True) \
                 != LX_STATE.LX_SUCCESS:
             sys.exit("开启 3D 深度流失败 (LX_BOOL_ENABLE_3D_DEPTH_STREAM)")
@@ -290,8 +313,8 @@ def main():
         else:
             print("[warn] 强制帧同步设置失败, 靠取帧重试兜底")
     depth_intr = get_depth_intrinsics(camera, handle, args.intrinsics, cam_sn) \
-        if args.depth3d else None
-    if args.depth3d and depth_intr is None:
+        if not args.no_depth3d else None
+    if not args.no_depth3d and depth_intr is None:
         print("[warn] 拿不到深度内参, 对齐不可用时无法内参投影回退")
     elif depth_intr is not None:
         print(f"深度内参: fx={depth_intr[0]:.3f} fy={depth_intr[1]:.3f} "
@@ -301,7 +324,16 @@ def main():
         sys.exit("DcStartStream 失败")
     print(f"模型: {args.model}  cores={args.cores}  流已启动, Ctrl+C / q 退出。")
 
-    writer = None  # 有 --save 时在拿到首帧后按实际帧尺寸创建
+    # ── 在线抓拍: 检测到货架就存带 XYZ 的推理帧 (jpg, 不录 mp4) ──
+    snap_dir = args.snap_dir if args.snap_dir is not None \
+        else os.path.join(os.path.dirname(os.path.abspath(__file__)), "snaps")
+    if snap_dir:
+        os.makedirs(snap_dir, exist_ok=True)
+        print(f"[snap] 抓拍开: {snap_dir}  检测到货架即存带 XYZ 图 (间隔 ≥ {args.snap_gap}s)",
+              flush=True)
+    else:
+        print('[snap] 抓拍关 (--snap-dir "")')
+    last_snap = 0.0
 
     fps_count, fps_time, fps = 0, time.time(), 0.0
     frame_fail = 0
@@ -335,9 +367,6 @@ def main():
             if args.color == "rgb":                  # SDK 若是 RGB 顺序, 转回 BGR 对齐推理管线
                 rgb = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
             frame_h, frame_w = rgb.shape[:2]
-            if writer is None and args.save:
-                writer = cv2.VideoWriter(args.save, cv2.VideoWriter_fourcc(*"mp4v"),
-                                         20, (frame_w, frame_h))
 
             # ── 与离线推理完全相同的预处理/推理/解码 ──
             lb, _, _ = letterbox(rgb)
@@ -350,7 +379,7 @@ def main():
             # ── 可选深度查表: SDK RGBD 对齐点云优先, 内参投影回退 ──
             points = None
             depth_map = None
-            if args.depth3d:
+            if not args.no_depth3d:
                 state, points = camera.getPointCloud(handle)
                 if state != LX_STATE.LX_SUCCESS or points is None or points.size == 0:
                     points = None
@@ -389,26 +418,46 @@ def main():
                 }
                 print(json.dumps(payload, ensure_ascii=False), flush=True)
 
-            # ── 显示 / 录制 ──
-            vis = draw_detections(rgb, dets, points, depth_map, depth_intr,
-                                  aligned=(pc_mode == 'aligned'))
-            cv2.putText(vis, f"FPS:{fps:.1f}", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            if writer is not None:
-                writer.write(vis)
-            if not args.no_display:
-                cv2.imshow("MRDVS Shelf Pose", vis)
-                if (cv2.waitKey(1) & 0xFF) in (ord("q"), 27):
-                    break
+            # ── 绘制 / 抓拍(带 XYZ) / 窗口 ──
+            now_gap_ok = (now - last_snap) >= args.snap_gap
+            if gui or (snap_dir and dets and now_gap_ok):
+                vis = draw_detections(rgb, dets, points, depth_map, depth_intr,
+                                      aligned=(pc_mode == 'aligned'))
+                # 有货架且距上次 ≥ snap_gap → 存 jpg + 打一行 xyz
+                if snap_dir and dets and now_gap_ok:
+                    last_snap = now
+                    bestd = max(dets, key=lambda d: d["conf"])
+                    a3 = bestd.get("anchor_3d") or []
+                    pts = [a for a in a3 if a is not None]
+                    center = None
+                    if len(pts) >= 2:
+                        center = [sum(p[i] for p in pts[:2]) / 2.0 for i in range(3)]
+                    ts = time.strftime("%Y%m%d_%H%M%S") + f"_{int((now % 1) * 1000):03d}"
+                    path = os.path.join(snap_dir, f"snap_{ts}.jpg")
+                    cv2.imwrite(path, vis)
+                    fmt = lambda v: None if v is None else [round(x, 1) for x in v]
+                    print(f"[snap] conf={bestd['conf']:.2f} "
+                          f"P1={fmt(pts[0]) if len(pts) > 0 else None} "
+                          f"P2={fmt(pts[1]) if len(pts) > 1 else None} "
+                          f"center={fmt(center)} → {path}", flush=True)
+                # 实时窗口 (headless 探测失败会自动跳过)
+                if gui:
+                    cv2.putText(vis, f"FPS:{fps:.1f}", (20, 40),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                    cv2.imshow("MRDVS Shelf Pose", vis)
+                    if (cv2.waitKey(1) & 0xFF) in (ord("q"), 27):
+                        break
 
     except KeyboardInterrupt:
         pass
     finally:
         camera.DcStopStream(handle)
         camera.DcCloseDevice(handle)
-        if writer is not None:
-            writer.release()
-        cv2.destroyAllWindows()
+        if gui:
+            try:
+                cv2.destroyAllWindows()
+            except cv2.error:
+                pass
         rknn.release()
         print("已退出。")
 
