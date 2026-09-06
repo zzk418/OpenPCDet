@@ -19,16 +19,100 @@ ssh root@<板子IP> "cd /root/rk3588_deploy && sudo bash deploy.sh"
 
 - `deploy.sh` 依次: ① 离线装 python 依赖 (wheelhouse, 无网) ② 装 MRDVS 相机 SDK (已装跳过)
   ③ `install_shelf_service.sh` 注册开机自启 ④ 跑一张自带测试图冒烟验证。
-- 换相机 IP: `CAMERA_IP=192.168.2.x` (默认 `192.168.2.150`): `ssh root@<板IP> "cd /root/rk3588_deploy && CAMERA_IP=192.168.2.x sudo bash deploy.sh"`
+- 换相机 IP: `CAMERA_IP=192.168.2.x` (默认 `192.168.2.151`): `ssh root@<板IP> "cd /root/rk3588_deploy && CAMERA_IP=192.168.2.x sudo bash deploy.sh"`
 - 板子 python3 需与 `wheels_aarch64/` 匹配 (cp38); 版本不符时 [1/4] 步会直接报错。
 - 旧包残留想彻底清掉, 先 `ssh root@<板IP> "rm -rf /root/rk3588_deploy"` 再执行上面两行。
+
+## 通信架构: 车控/PLC 直连 (取代 Program_3)
+
+原链路是两层转发: 车控/PLC(Modbus TCP **客户端**) ⇄ Program_3(Modbus TCP **Server** :30000)
+⇄ JSON(:5511) ⇄ 本服务。现在去掉 Program_3, `shelf_pos_service.py` **自己就是
+Modbus TCP Server**, 车控/PLC 按原协议直连读写 —— 连接角色 / 端口 / 寄存器
+0~19 布局 / 语义与 Program_3 的 NEWMODBUS 完全一致:
+
+- **0~9 车控可写**: `reg1` 拍照命令 (0=无 3=货架单次 4=货架连续; 1/2/5/6 托盘/平台
+  不支持 → 异常), `reg2` 写 1 清故障码, `reg0` 叉车心跳
+- **10~19 视觉回 (车控只读)**: `reg10` 视觉心跳(1s 翻转) `reg11` 拍照回令
+  `reg12` 工作状态 (0空闲/1拍照中/2完成/3异常) `reg13` 故障码
+  (照 Program_3 = `40 - error_code`: **41**=无货架/推理失败,
+  **42**=不支持的拍照命令; 车写 reg2=1 清 0)
+  `reg14~17` 位姿 X·Y·偏航·Z (×10, 0.1mm/0.1°, 可负=int16) `reg18` 板温
+- **闭环**: 车控写 reg1=3 → 服务拍一帧推理中心点 → 换算补偿位姿写 reg14~17 +
+  reg12=2(完成) → 车控读到位姿后写 reg1=0 → 回空闲并清 reg11, 才可触发下一次
+- 位姿换算参考/钳位在 `plc_pose_ref.json`, **现场标定只改它, 不动代码**。
+  默认 **ref = {x:-1567, z:-286} = 以『完美取货位』为基准的偏移 (delta)**: 完美中心
+  在相机帧 (0,-286,1567)mm 时 reg14~17 全 0, 偏离多少就发多少 (0.1mm)。
+  Program_3 那套角点 ref y1=635/y2=765/z=120 会给中心点硬加几百 mm 假偏移, 已弃。
+  换算公式与现场标定/安全步骤见下面「位姿换算 · 现场标定」节
+
+### 运行 / PLC 通信联测
+
+```bash
+# 板子常驻 (systemd 自启): 车控连 <板子IP>:30000 (照 Program_3 连法)
+python3 shelf_pos_service.py
+
+# 本机全链路回归 (不连相机/模型/RKNN): 起 --from-file 服务
+python3 shelf_pos_service.py --from-file \
+    --center-file center_xyz.json --plc-port 31000
+
+# 另开终端当"车控"测 (心跳/单次拍照+位姿换算/不支持命令故障/应答复位):
+python3 sim_plc_client.py --host 127.0.0.1 --port 31000 \
+    --expect-xyz 0,0,1500.0          # 已知中心点 → 精确校验 reg14~17
+# 一键: 自动拉 --from-file 服务 + 跑全部用例
+python3 sim_plc_client.py --local-e2e
+# 对板子/现场
+python3 sim_plc_client.py --host 192.168.2.102 --port 30000
+```
+
+### 位姿换算 · 现场标定与安全
+
+寄存器 = 以**完美取货位**为基准的偏移 ×10 (0.1mm / 0.1°, 可负=int16)。换算照
+Program_3 的 `reg = ref + 测量` (refs 是**加性基线**, Program_3 里它填的是角点
+`posReference_*`), 我们把 ref 填成"完美点各轴测量取反", 使回归到完美位姿时
+reg14~17 全 0 —— 传出去的就是**相对完美位置的 delta**:
+
+```
+完美中心 (相机帧): x 横向=0, y 竖直=-286, z 前向=1567 (mm)
+   ↳ ref = {x:-1567, y1:0, y2:0, z:-286, xita:0}
+
+reg14 X前向 =  refX×10      + round(z×10)   = (z-1567)×10   # 前向偏移
+reg15 Y横向 = (x<0:+refY1 | x>0:-refY2)×10 + round(x×10)
+                                          = x×10            # 横向偏移 (refY1=Y2=0)
+reg17 Z竖直 = (-refZ)×10 - round(-y×10)     = 2860 + y×10   # 在 y=-286 归 0
+reg16 偏航  =  refXita×10 + 0                              # 中心点无偏航, 恒 0
+```
+
+- **residual 标定 (现场必做)**: 车停准"取货位"、货架摆正, 触发看 reg14~17 解码剩的
+  **固定残差** (应为 0; 不为 0 = 相机/叉齿安装偏置), 把残差填回对应轴 ref (如
+  前向恒差 -40mm → reg14 读出 +400 → ref.x 调 -40), 重触发应读出 0。ref 只需测一次,
+  thr 一般不用动。
+- **静态对拍 (上实测前)**: 完美位姿触发 → reg14~17 应全 0; 再手动把货架左/右/升/降
+  已知量 → 对应轴应读出该量 (0.1mm)。若 reg14 前向实际应发**绝对距离**而非偏移,
+  把 `ref.x` 改 0 即可 (会回到 z≈1.5m → reg14≈15670, 别和 thr 打架)。
+- **符号**: reg14/reg15/reg17 正负和实际移动方向相反时, 改 `shelf_pos_service.py`
+  顶部 `SIGN_X`/`SIGN_Z` (或对应轴 ref 正负), 别乱猜, 用静态对拍定。
+- **安全阈值 thr**: 饱和钳位, 防指令离谱。日志 `reg14~17=[...]` 若**顶到 ±thr**
+  说明读数超量程 → 别上实测, 先核对量程/寄存器语义。
+
+**上实测前的安全流程 (静态→低速)**:
+1. `sim_plc_client.py --local-e2e` 全绿 (协议层已稳)。
+2. 板端 `shelf_pos_service.py --self-test`, 相机前有货架 → 打印 XYZ, 与卷尺量
+   的方向/量级一致。
+3. 车停准, 货架**人为偏一侧已知距离** (如左移 50mm), 触发 → reg15 应朝对应方向
+   变 ~500 (0.1mm), 且没顶 thr。
+4. 观察日志: `[plc] 拍照完成 → xyz=[...]mm reg14~17=[...]` 数值合理、reg13=0。
+5. 货架/车身**错开量减到 ~0** 复测 (回归, 确认残差已清)。
+6. 以上都对了, 才做**低速小偏移**的整机验证; 头几次留人在急停旁。
 
 ## 目录结构
 
 ```
 rk3588_deploy/                        # 最小生产部署包 (2026-08-31)
 ├── shelf_mobilenet_r2_fp16.rknn   # NPU 模型 (24.6MB, fp16, RK3588)  ★当前生产模型
-├── shelf_pos_service.py            # 生产服务: 监听触发→推理→回pos→PLC (systemd 自启)
+├── shelf_pos_service.py            # 生产服务 = Modbus TCP Server, 车控/PLC 直连 (systemd 自启)
+├── plc_modbus.py                   # 纯 socket Modbus TCP Server (服务 import, 零第三方依赖)
+├── plc_pose_ref.json               # 位姿换算参考/钳位 (照 Program_3 HuoJia, 现场只改它)
+├── sim_plc_client.py              # 联测: 扮演车控测 PLC 通信 (心跳/单次/故障/连续, 本地可全链路)
 ├── infer_camera_sdk.py             # SDK 相机实时推理 (生产服务用)
 ├── infer_camera.py                 # letterbox/decode 核心 (被服务 import)
 ├── infer_image.py                  # 离线推理: 图片→关键点 + PCD 深度 3D 锚点
@@ -48,7 +132,7 @@ rk3588_deploy/                        # 最小生产部署包 (2026-08-31)
 
 > 📦 退役清单 (统一在 `output/rk3588_deploy.bak/retired_20260831/`): int8 模型
 > (`shelf_v6_s_fgd_qat_int8.rknn` / `int8_hybrid.rknn`)、`infer_int8.sh`、
-> dev 测试脚本 (`test_modbus_plc.py` / `test_rgbd_align.py`)、静态 `shelf_pos.service`
+> dev 测试脚本 (`test_rgbd_align.py`)、静态 `shelf_pos.service`
 > (服务文件由 `install_shelf_service.sh` 按实际目录动态生成)、实验报告
 > (`int8_calib_hybrid_report.md`)、完整 imgs 测试集 (`imgs_all/`)、推理产物
 > (`results*`)、`log/`。

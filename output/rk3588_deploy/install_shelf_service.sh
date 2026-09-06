@@ -9,13 +9,13 @@
 #   3. 启用 + 立即启动 (开机自启 + 现在就跑)
 #   4. 打印状态和最近日志
 #
-# 可选环境变量: CAMERA_IP 默认 192.168.2.150
+# 可选环境变量: CAMERA_IP 默认 192.168.2.151
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UNIT="/etc/systemd/system/shelf_pos.service"
 PY="$(command -v python3 || true)"
-CAMERA_IP="${CAMERA_IP:-192.168.2.150}"
+CAMERA_IP="${CAMERA_IP:-192.168.2.151}"
 
 # ── 0. 前置检查 ──
 [ "$(id -u)" = "0" ] || { echo "需要 root: 用 sudo bash $0"; exit 1; }

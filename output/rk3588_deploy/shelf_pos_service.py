@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""货架识别自动服务 — 自动监听 + 触发即推理 → 回 pos → Program_3 转 PLC.
+"""货架识别自动服务 — 直连车控/PLC (取代 Program_3).
 
 一个进程串起整条链 (替代"推理写文件 + 服务读文件"的两进程方案):
 
-    1. 启动    : 加载 RKNN 模型 + 打开相机 (LxCamera SDK, RGBD 深度对齐) + 监听 TCP :5511
-    2. 收到触发 : Program_3 发 {"action":"3D","id":1,"random_number":1}
-                  → 现场抓一帧 → 推理 → 深度查表 → 两角点 XYZ 取均值 = 货架中心点
-    3. 回 pos  : {"error_code":0,"pos":[Y,Z,X,angle],"random_number":1}
-    4. 发给 PLC: Program_3 收到 pos 后照旧写 Modbus 14~17 → 运控/叉车
-                  (脚本不碰 Modbus, 只负责把货架中心算出来喂给 Program_3)
+    1. 启动    : 加载 RKNN 模型 + 打开相机 (LxCamera SDK, RGBD 深度对齐)
+    2. 触发     : 车控/PLC 作为 Modbus TCP 客户端直连本服务 (:30000),
+                  写 reg1(拍照命令)=3 → 现场抓一帧 → 推理 → 深度查表 →
+                  两角点 XYZ 取均值 = 货架中心点 → 换算成补偿位姿写回
+                  reg14~17 (×10, 0.1mm/0.1°) + 工作状态 reg12=2(拍照完成)
+    3. 闭环     : 车控轮询读到位姿后写 reg1=0 → 服务回空闲并清拍照回令,
+                  才能触发下一次 (寄存器 0~19 布局与 Program_3 完全一致, 见 plc_modbus.py)
 
 相机系 → pos 映射: pos = [x, -y, z, 0]  (x=右+, y=下+, z=前方; 符号不对翻 SIGN_X/SIGN_Z)
 
 用法:
-    python3 shelf_pos_service.py                     # 常驻: 自动监听, 触发即推理
-    python3 shelf_pos_service.py --ip 192.168.2.150  # 指定相机 IP (默认自动发现第一台)
-    python3 shelf_pos_service.py --port 5512         # 换监听端口
+    python3 shelf_pos_service.py                     # 常驻: Modbus 直连车控, 触发即推理
+    python3 shelf_pos_service.py --ip 192.168.2.151  # 指定相机 IP (默认自动发现第一台; 部署默认 .151)
+    python3 shelf_pos_service.py --plc-port 30000    # 换 Modbus 端口 (0=关闭 PLC)
+    python3 shelf_pos_service.py --json-port 5511    # 兼容旧链路: 额外监听 Program_3 JSON 触发
     python3 shelf_pos_service.py --self-test         # 现场推理一次, 打印 XYZ+JSON (验证整条链)
     python3 shelf_pos_service.py --from-file         # 测试模式: 只读 center_xyz.json, 不连相机
+                                                     #   → PLC Modbus 全链路可本机联测 (无相机/模型)
     # 输入核对: 保存前 N 帧两模态 (RGB jpg + PCD, 与 imgs/ 训练数据同格式), 供肉眼确认输入对不对
     python3 shelf_pos_service.py --self-test --dump-frames 5
-    python3 shelf_pos_service.py --ip 192.168.2.150 --dump-frames 10 --dump-dir /root/rk3588_deploy/input_check
+    python3 shelf_pos_service.py --ip 192.168.2.151 --dump-frames 10 --dump-dir /root/rk3588_deploy/input_check
     # 离线自检: 不连相机, 直接喂 imgs/ 训练数据 (jpg + pcd) 或 dump 的帧, 没真货架也能测链
     python3 shelf_pos_service.py --self-test --image imgs/TV_xxx.jpg --pcd imgs/TV_xxx.pcd
 
@@ -52,6 +55,16 @@ from infer_camera_sdk import (
 import shelf_viz                          # build_depth_map: 无序点云→深度图 (离线 imgs)
 from query_camera_intrinsics import find_sdk_lib
 
+# ── PLC 直连 (取代 Program_3): 本服务即 Modbus Server ──
+from plc_modbus import (
+    PlcModbusServer, RegBank,
+    PHOTO_CMD, FAULT_RESET,
+    VIS_HEARTBEAT, VIS_REPLY, VIS_STATE, VIS_FAULT,
+    VIS_X, VIS_Y, VIS_YAW, VIS_Z, VIS_TEMP,
+    ST_IDLE, ST_SHOOTING, ST_DONE, ST_ERR,
+    CMD_NONE, CMD_SHELF, CMD_SHELF_CONT,
+)
+
 # ── 相机系 → 内置算法 pos 的符号配置 ─────────────────────────────
 # 现场内置算法回 Y=760, Z=-87, X=1517 → 默认映射 pos=[x, -y, z, 0]
 # 若同帧对拍差符号, 翻下面两个值即可
@@ -75,6 +88,9 @@ LOCK_FILE = Path("/root/rk3588_deploy/shelf_pos_service.lock")
 
 # 持有已获取的 flock fd, 防止文件对象被 GC 提前关闭 → 进程存活期间锁才有效
 _LOCK_HOLDERS = []
+
+# 全局停止信号 (SIGTERM / Ctrl+C 置位): Modbus 心跳/连续拍照线程据此退出
+_STOP = threading.Event()
 
 
 def acquire_single_instance(lock_file=LOCK_FILE):
@@ -641,6 +657,224 @@ def to_pos(xyz):
     }, separators=(",", ":"))
 
 
+# ── PLC 直连: 位姿换算参考值/钳位阈值 (照 plc_pose_ref.json, 现场只改 json 不动代码) ──
+# 传的是『相对完美取货位的偏移(delta)』: ref = -(完美中心读数映射), 完美中心
+# xyz=(0,-286,1567)mm → 该位姿 reg14~17 全 0。ref.x=-1567 归零前向、ref.z=-286 归零竖直。
+# (Program_3 的角点 ref y1=635/y2=765/z=120 给中心点硬加几百 mm 假偏移, 已弃。)
+PLC_REF_DEFAULT = {
+    "ref": {"x": -1567, "y1": 0, "y2": 0, "z": -286, "xita": 0},
+    "thr": {"x": 20000, "y": 3000, "z": 2000, "xita": 50},
+}
+
+
+def load_plc_ref(path):
+    """读 plc_pose_ref.json 换算参数 (ref=参考值, thr=钳位阈值, 单位 0.1mm/0.1°).
+    默认=Program_3 货架现场参考; 现场标定/要用纯测量偏移时改文件即可 (全 0 = 直出测量)."""
+    if path:
+        if not os.path.isfile(path):
+            print(f"[plc] 换算参数文件不存在: {path}, 用默认值", flush=True)
+        else:
+            try:
+                with open(path, encoding="utf-8") as f:
+                    cfg = json.load(f)
+                if "ref" in cfg and "thr" in cfg:
+                    return cfg
+                print(f"[plc] {path} 缺 ref/thr 字段, 用默认换算参数", flush=True)
+            except Exception as e:
+                print(f"[plc] 读 {path} 失败 ({e}), 用默认换算参数", flush=True)
+    else:
+        d = os.path.dirname(os.path.abspath(__file__))
+        p = os.path.join(d, "plc_pose_ref.json")
+        if os.path.isfile(p):
+            return load_plc_ref(p)
+    return json.loads(json.dumps(PLC_REF_DEFAULT))          # 深拷贝, 防调用方改坏默认
+
+
+def plc_pose_to_regs(xyz, cfg):
+    """货架中心 [x,y,z] mm → reg14~17 四个整数 (0.1mm/0.1°, 可负=补码).
+
+    语义: 发『相对完美取货位的偏移』——cfg.ref = -(完美中心映射), 让车停准、货架
+    摆正时 reg14~17 全 0 (完美中心见 plc_pose_ref.json _perfect: x=0,y=-286,z=1567)。
+    换算照 Program_3 (mainwindow.cpp: rounded=ref*10+round(测量*10)):
+        pos = [Y,Z,X,angle] = [SIGN_X*x, SIGN_Z*y, z, 0];  angle 恒 0(中心点无偏航)
+        X  =  refX*10 + round(X*10)              # 前向偏移 (z-1567)*10
+        Y  =  (测量Y<0) +refY1*10 | (Y>0) -refY2*10, 再 + round(Y*10)
+        yaw=  refXiTa*10 + round(angle*10)
+        Z  = -refZ*10 - round(Z*10)              # refZ=-286 时在 y=-286 归 0
+    再按 ±thr 饱和钳位. 返回 [x, y, yaw, z] 对应 reg14/15/16/17.
+    """
+    x, y, z = xyz
+    pY = SIGN_X * x
+    pZ = SIGN_Z * y
+    pX = z                                       # 前方深度
+    pA = 0.0
+    rx = cfg["ref"]["x"] * 10 + round(pX * 10)
+    if pY < 0:
+        ry = cfg["ref"]["y1"] * 10 + round(pY * 10)
+    elif pY > 0:
+        ry = -cfg["ref"]["y2"] * 10 + round(pY * 10)
+    else:
+        ry = 0
+    rw = cfg["ref"]["xita"] * 10 + round(pA * 10)
+    rh = -cfg["ref"]["z"] * 10 - round(pZ * 10)
+
+    def _clamp(v, t):                            # 饱和钳位到 ±t
+        t = float(t)
+        return -t if v < -t else (t if v > t else v)
+
+    return [int(_clamp(v, cfg["thr"][k])) for v, k in
+            ((rx, "x"), (ry, "y"), (rw, "xita"), (rh, "z"))]
+
+
+class PlcBridge:
+    """把车控(Modbus 客户端)写进来的命令接到推理, 再把位姿换算写回 reg14~17.
+    reg 语义见 plc_modbus.py: reg1 拍照命令, reg2 故障复位, reg11 回令,
+    reg12 状态(0空闲/1拍照中/2完成/3异常), reg13 故障码(=40-err), reg10 视觉心跳."""
+
+    SHELF_RETRIES = 5                            # 货架单次失败重试次数 (Program_3: <5 会重触发)
+
+    def __init__(self, regs, get_xyz, ref_cfg, log=print):
+        self.regs = regs
+        self.get_xyz = get_xyz
+        self.ref_cfg = ref_cfg
+        self._log = log
+        self._busy = False
+        self._lock = threading.Lock()
+        regs.on_car_reg = self._on_car_reg       # 车控写 0~9 回调挂这
+
+    # ── 车控写回调 (运行在 Modbus 连接线程) ──
+    def _on_car_reg(self, addr, value):
+        if addr == FAULT_RESET and value == 1:
+            self.regs.write(VIS_FAULT, 0)        # 故障复位: 清 reg13
+            self._log("[plc] 车控故障复位 (reg2=1) → reg13 故障码已清零", flush=True)
+        elif addr == PHOTO_CMD:
+            self._on_photo_cmd(value)
+
+    def _on_photo_cmd(self, cmd):
+        if cmd == CMD_NONE:
+            # 车控收到位姿后写 0 → 回空闲并清回令; 拍照中途不回清(等结果落地, 比 Program_3 稳)
+            if not self._busy:
+                self.regs.write(VIS_STATE, ST_IDLE)
+                self.regs.write(VIS_REPLY, 0)
+            return
+        with self._lock:
+            if self._busy:
+                self._log(f"[plc] 命令 {cmd} 忽略: 上一任务进行中", flush=True)
+                return
+            if self.regs.read(VIS_STATE) != ST_IDLE:
+                self._log(f"[plc] 命令 {cmd} 忽略: 工作状态={self.regs.read(VIS_STATE)}"
+                          f" 非空闲 (车控需先写 reg1=0)", flush=True)
+                return
+            self._busy = True
+        self.regs.write(VIS_STATE, ST_SHOOTING)  # 拍照中
+        self.regs.write(VIS_REPLY, 1)            # 拍照回令=1
+        threading.Thread(target=self._job, args=(cmd,), daemon=True).start()
+
+    # ── 拍照任务线程 ──
+    def _job(self, cmd):
+        try:
+            if cmd == CMD_SHELF:                                  # 3 货架单次
+                self._run(retries=self.SHELF_RETRIES)
+            elif cmd == CMD_SHELF_CONT:                           # 4 货架连续
+                # 车控保持 reg1=4: 每轮置"拍照中"→推理→"完成"写新位姿; reg1 归 0 停
+                while self.regs.read(PHOTO_CMD) == CMD_SHELF_CONT \
+                        and not _STOP.is_set():
+                    self.regs.write(VIS_STATE, ST_SHOOTING)
+                    if not self._run(retries=1):
+                        break
+                    time.sleep(0.5)
+                self.regs.write(VIS_STATE, ST_IDLE)
+                self.regs.write(VIS_REPLY, 0)
+            else:                                                 # 托盘/平台等不支持
+                self._fail(-2, f"本服务只支持货架拍照命令 (reg1=3/4), 收到 {cmd}")
+        finally:
+            self._busy = False
+
+    def _run(self, retries):
+        """跑一次/几次推理 → 写位姿 reg14~17 + reg12=2(完成). 成功返回 True.
+        失败 retries 次内保持"拍照中", 全部失败才置异常(照 Program_3 重试语义)."""
+        last = None
+        for i in range(retries):
+            try:
+                xyz = self.get_xyz()
+                r = plc_pose_to_regs(xyz, self.ref_cfg)
+                for addr, v in zip((VIS_X, VIS_Y, VIS_YAW, VIS_Z), r):
+                    self.regs.write(addr, v)
+                self.regs.write(VIS_FAULT, 0)  # 成功清故障码
+                self.regs.write(VIS_STATE, ST_DONE)      # 拍照完成
+                self._log(f"[plc] 拍照完成 → xyz=[{', '.join(f'{v:.1f}' for v in xyz)}]mm"
+                          f" reg14~17={r} (0.1mm/0.1°)", flush=True)
+                return True
+            except Exception as e:
+                last = e
+                if i + 1 < retries:
+                    self._log(f"[plc] 推理失败 ({i + 1}/{retries}): {e}", flush=True)
+                    time.sleep(0.4)
+        self._fail(-1, str(last) or "拍照失败(未检测到货架/推理异常)")
+        return False
+
+    def _fail(self, err, why):
+        self.regs.write(VIS_STATE, ST_ERR)      # 拍照异常
+        self.regs.write(VIS_FAULT, 40 - err)    # 故障码 reg13 = 40 - error_code
+        for a in (VIS_X, VIS_Y, VIS_YAW, VIS_Z):
+            self.regs.write(a, 0)               # 异常不吐位姿
+        self._log(f"[plc] 拍照异常: {why} (reg13={40 - err})", flush=True)
+
+
+def plc_heartbeat_loop(regs, stop):
+    """视觉心跳: reg10 每 ~1s 0/1 翻转 (照 Program_3 1000ms)."""
+    hb = 0
+    while not stop.is_set():
+        regs.write(VIS_HEARTBEAT, hb)
+        hb ^= 1
+        for _ in range(50):                    # 共 ~1s, 分片可被停止打断
+            if stop.is_set():
+                return
+            time.sleep(0.02)
+
+
+def plc_temp_loop(regs, stop):
+    """工控机温度 reg18 (°C). 读 RK3588 热区; 读不到保持 0. 每 ~5s 刷新."""
+    zone = next((f"/sys/class/thermal/thermal_zone{i}/temp" for i in range(8)
+                 if os.path.isfile(f"/sys/class/thermal/thermal_zone{i}/temp")), None)
+    while not stop.is_set():
+        if zone:
+            try:
+                regs.write(VIS_TEMP, int(round(int(Path(zone).read_text().strip()) / 1000.0)))
+            except Exception:
+                pass
+        for _ in range(250):                   # 共 ~5s
+            if stop.is_set():
+                return
+            time.sleep(0.02)
+
+
+def json_server_loop(host, port, get_xyz, stop, log=print):
+    """(旧链路兼容, 默认关) 监听一个 TCP 端口收 Program_3 的 JSON 触发 → 回 pos JSON."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((host, port))
+    srv.listen(8)
+    srv.settimeout(1.0)                        # 每秒醒来查一次退出信号
+    log(f"JSON 触发监听(旧链路兼容) {host}:{port}", flush=True)
+    try:
+        while not stop.is_set():
+            try:
+                conn, addr = srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            log(f"[连接] {addr}", flush=True)
+            threading.Thread(target=handle_client, args=(conn, get_xyz, None),
+                             daemon=True).start()
+    finally:
+        try:
+            srv.close()
+        except Exception:
+            pass
+
+
 def handle_client(conn, get_xyz, cfg):
     """一个连接: 收到触发 → 现场推理 → 回一条 JSON. 连接保持, 可多次触发."""
     try:
@@ -675,9 +909,23 @@ def handle_client(conn, get_xyz, cfg):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="货架识别自动服务: 监听触发→推理→回 pos→PLC")
-    ap.add_argument("--host", default="0.0.0.0")
-    ap.add_argument("--port", type=int, default=5511)
+    ap = argparse.ArgumentParser(
+        description="货架识别自动服务(车控/PLC 直连版): 本服务即 Modbus TCP Server"
+                    ", 取代 Program_3 直接和车控通信")
+    ap.add_argument("--host", default="0.0.0.0",
+                    help="旧链路 JSON 监听的绑定地址")
+    ap.add_argument("--port", type=int, default=0,
+                    help="(旧参数) 等同 --json-port, 旧脚本仍可用")
+    ap.add_argument("--json-port", type=int, default=0,
+                    help="旧链路兼容: 额外开一个 TCP JSON 触发端口 (默认 0=关;"
+                         " 只对接遗留上位机时才开)")
+    ap.add_argument("--plc-host", default="0.0.0.0",
+                    help="Modbus TCP Server 监听地址, 车控连这个 (默认 0.0.0.0)")
+    ap.add_argument("--plc-port", type=int, default=30000,
+                    help="Modbus TCP Server 端口 (默认 30000; 0=关掉 Modbus,"
+                         " 只留 JSON 旧链路)")
+    ap.add_argument("--plc-ref", default=None,
+                    help="位姿换算参考/阈值 JSON (默认取脚本同目录 plc_pose_ref.json)")
     ap.add_argument("--from-file", action="store_true",
                     help="测试模式: 中心点读 center_xyz.json, 不连相机不推理")
     ap.add_argument("--center-file", default=str(CENTER_FILE),
@@ -709,6 +957,10 @@ def main():
     ap.add_argument("--pcd", default=None,
                     help="离线自检: 点云 .pcd (imgs/TV_xxx.pcd 无序 或 dump 有序) 或 .npy")
     args = ap.parse_args()
+    if args.port:                        # --port 旧别名 → json 端口
+        args.json_port = args.port
+    if args.plc_port and not args.plc_host:
+        args.plc_host = "0.0.0.0"
 
     if args.self_test and args.from_file:
         sys_exit("--self-test 与 --from-file 不能同时用")
@@ -717,7 +969,7 @@ def main():
 
     # 停止信号: SIGTERM → 置位, 主循环干净退出 → finally 里 close() 释放相机独占锁.
     # (SIGINT 不接管, Ctrl+C 仍走 KeyboardInterrupt 原路径)
-    _STOP = threading.Event()
+    _STOP.clear()
 
     def _on_sigterm(sig, frm):
         print("\n[SIGTERM] 收到停止信号, 正在释放相机退出…", flush=True)
@@ -809,29 +1061,47 @@ def main():
         get_xyz = lambda: read_center_file(args.center_file)
         print("测试模式 --from-file: 中心点读 center_xyz.json, 不连相机", flush=True)
 
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((args.host, args.port))
-    srv.listen(8)
-    srv.settimeout(1.0)              # 每秒醒来查一次退出信号 (SIGTERM 干净退出)
-    print(f"货架识别服务监听 {args.host}:{args.port} (协议: 内置算法同款)", flush=True)
-    print("触发 → 现场推理 → 回 pos → Program_3 写 Modbus 14~17 → 运控/PLC", flush=True)
-    print("相机: 断流自动重连; Ctrl+C / SIGTERM 干净退出并释放相机独占锁", flush=True)
+    # ── 启动监听 (主: Modbus TCP Server 车控直连 / 兼容: 旧 JSON 触发口) ──
+    plc_srv = None
+    daemons = []
     try:
+        if args.plc_port:
+            ref_cfg = load_plc_ref(args.plc_ref)
+            regs = RegBank()
+            PlcBridge(regs, get_xyz, ref_cfg)     # 构造即挂 regs.on_car_reg 回调
+            plc_srv = PlcModbusServer(regs, host=args.plc_host, port=args.plc_port)
+            plc_srv.start()
+            for fn in (plc_heartbeat_loop, plc_temp_loop):
+                t = threading.Thread(target=fn, args=(regs, _STOP), daemon=True)
+                t.start()
+                daemons.append(t)
+            print("[plc] 车控/PLC 直连 (取代 Program_3): "
+                  f"{args.plc_host}:{args.plc_port}  HoldingRegisters 0~19", flush=True)
+            print("[plc] reg1 拍照命令 3=货架单次 4=货架连续 → 推理 → "
+                  "reg12=2(完成) 位姿写 reg14~17(0.1mm/0.1° 可负)", flush=True)
+            print(f"[plc] 换算参数 ref={ref_cfg['ref']} thr={ref_cfg['thr']}", flush=True)
+        if args.json_port:
+            t = threading.Thread(target=json_server_loop,
+                                 args=(args.host, args.json_port, get_xyz, _STOP),
+                                 daemon=True)
+            t.start()
+            daemons.append(t)
+        if plc_srv is None and not args.json_port:
+            print("--plc-port 与 --json-port 都没开, 无可触发入口, 退出", flush=True)
+            return
+        if engine is not None:
+            print("相机: 断流自动重连; Ctrl+C / SIGTERM 干净退出并释放相机独占锁", flush=True)
         while not _STOP.is_set():
-            try:
-                conn, addr = srv.accept()
-            except socket.timeout:
-                continue             # accept 超时 → 回 while 判 _STOP
-            except OSError:
-                break
-            print(f"[连接] {addr}", flush=True)
-            threading.Thread(target=handle_client, args=(conn, get_xyz, args),
-                             daemon=True).start()
+            time.sleep(0.5)          # 主线程值守, 退出由信号/KeyboardInterrupt 触发
     except KeyboardInterrupt:
         pass
     finally:
-        srv.close()
+        _STOP.set()
+        if plc_srv is not None:
+            plc_srv.stop()
+        for t in daemons:
+            if t.is_alive():
+                t.join(timeout=1.0)
         if engine is not None:
             engine.close()
         print("已退出。")

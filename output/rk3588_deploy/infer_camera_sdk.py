@@ -10,7 +10,7 @@
     python infer_camera_sdk.py
 
     # 指定相机
-    python infer_camera_sdk.py --ip 192.168.2.150
+    python infer_camera_sdk.py --ip 192.168.2.151
     python infer_camera_sdk.py --sn 519889C9A2A6468E
     python infer_camera_sdk.py --index 0
 
