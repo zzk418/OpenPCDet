@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# RK3588 板端推理脚本 (fp16 版, 默认模型 shelf_mobilenet_r2_fp16.rknn)
+# RK3588 板端推理脚本 (fp16 版, 默认模型 shelf_mobilenet_r3_fp16.rknn)
 #
 # 用法:
 #   bash infer_fp16.sh                          # 离线推理 imgs/ 全部测试图 (10张)
@@ -13,7 +13,7 @@
 set -e
 cd "$(dirname "$0")"
 
-FP16_MODEL="shelf_mobilenet_r2_fp16.rknn"
+FP16_MODEL="shelf_mobilenet_r3_fp16.rknn"
 OUT_DIR="results_fp16"
 
 MODE="${1:-}"

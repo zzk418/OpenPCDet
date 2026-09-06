@@ -1,9 +1,9 @@
 # RK3588 货架关键点部署包 (最小推理版)
 
-YOLOv8s-pose 货架关键点模型 **fp16 版** (`shelf_mobilenet_r2_fp16.rknn`) 的 RK3588 NPU 端部署包。
+YOLOv8s-pose 货架关键点模型 **fp16 版** (`shelf_mobilenet_r3_fp16.rknn`) 的 RK3588 NPU 端部署包。
 模型已转 fp16 `.rknn`, **拷贝到板子装上 rknn-toolkit-lite2 即可直接运行**。
 
-> 当前生产模型: `shelf_mobilenet_r2_fp16.rknn` (fp16, night_c2 权重)。
+> 当前生产模型: `shelf_mobilenet_r3_fp16.rknn` (fp16, MobileNetV3-Large-pose, 光照鲁棒 r3 权重)。
 > fp16 无 int8 量化损失, conf 与 fp32 基本一致 (适合置信度门控), test_neg 无误检。
 > 切换原因: int8 (FGD 蒸馏版) 强目标 conf 虽高但弱目标丢失、且 conf 数值不可靠 → 弃用 (用户决定)。
 
@@ -108,7 +108,7 @@ reg16 偏航  =  refXita×10 + 0                              # 中心点无偏�
 
 ```
 rk3588_deploy/                        # 最小生产部署包 (2026-08-31)
-├── shelf_mobilenet_r2_fp16.rknn   # NPU 模型 (24.6MB, fp16, RK3588)  ★当前生产模型
+├── shelf_mobilenet_r3_fp16.rknn   # NPU 模型 (15.5MB, fp16, RK3588)  ★当前生产模型
 ├── shelf_pos_service.py            # 生产服务 = Modbus TCP Server, 车控/PLC 直连 (systemd 自启)
 ├── plc_modbus.py                   # 纯 socket Modbus TCP Server (服务 import, 零第三方依赖)
 ├── plc_pose_ref.json               # 位姿换算参考/钳位 (照 Program_3 HuoJia, 现场只改它)

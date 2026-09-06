@@ -7,7 +7,7 @@
     python infer_camera.py --cores 7 --json    # 三核 + 逐帧打印检测 JSON
     python infer_camera.py --save out.mp4      # 同时录制视频
 
-模型: shelf_mobilenet_r2_fp16.rknn (MobileNetV3-Large-pose, 640x640, fp16)
+模型: shelf_mobilenet_r3_fp16.rknn (MobileNetV3-Large-pose, 640x640, fp16)
 输出: 单输出或三输出拆分版 (box[1,4,8400] + conf[1,1,8400] + kpts[1,6,8400]) 自动兼容,
       decode_yolopose 内 merge_outputs 按 shape 合并回 [1,11,8400]。
 
@@ -33,7 +33,7 @@ LETTERBOX_FILL = 114    # 与 ultralytics letterbox 一致
 N_KPTS = 2              # P1/P2 两个关键点
 CONF_SCALE = 256.0      # 旧手术版模型 conf 已 ×256; 生产 fp16 conf 原生 0~1 (解码按 >1.5 自动识别)
 DEFAULT_MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "shelf_mobilenet_r2_fp16.rknn")
+                             "shelf_mobilenet_r3_fp16.rknn")
 
 
 # ═══════════════════════ 纯 numpy 预处理 ═══════════════════════
