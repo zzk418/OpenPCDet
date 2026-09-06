@@ -24,7 +24,11 @@ IMG_W, IMG_H = 640, 480
 
 # ────────────────────────────── 轻增强单图 ──────────────────────────────
 def augment_single_light(img, kps):
-    """轻度几何(单次仿射合并缩放/旋转/平移) + HSV + 亮对比 + 轻模糊/噪声。
+    """轻度几何(单次仿射合并缩放/旋转/平移) + 强光度增强 + 轻模糊/噪声。
+
+    光度增强针对"光照变化"(只改颜色/明暗, 不动几何、不混标签):
+      HSV(V 大范围模拟暗仓库~过曝) + 亮对比 + gamma(曝光) + CLAHE(强阴影) +
+      色温/色偏 + 通道dropout(对单色/色偏鲁棒)。
 
     kps: [(u, v), ...]  (像素坐标)
     返回: (aug_img, aug_kps)
@@ -44,17 +48,46 @@ def augment_single_light(img, kps):
         new_pt = M @ np.array([u, v, 1.0])
         aug_kps.append((float(new_pt[0]), float(new_pt[1])))
 
-    # HSV 抖动(轻度)
+    # ── 光度增强 (光照鲁棒) ──
+    # 1) HSV: V 大范围(暗~过曝), S 中, H 轻(货架颜色中性)
     hsv = cv2.cvtColor(aug_img, cv2.COLOR_BGR2HSV).astype(np.float32)
-    hsv[:, :, 0] = np.clip(hsv[:, :, 0] + np.random.uniform(-6, 6), 0, 179)
-    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * np.random.uniform(0.85, 1.15), 0, 255)
-    hsv[:, :, 2] = np.clip(hsv[:, :, 2] * np.random.uniform(0.85, 1.15), 0, 255)
+    hsv[:, :, 0] = np.clip(hsv[:, :, 0] + np.random.uniform(-12, 12), 0, 179)
+    hsv[:, :, 1] = np.clip(hsv[:, :, 1] * np.random.uniform(0.55, 1.5), 0, 255)
+    hsv[:, :, 2] = np.clip(hsv[:, :, 2] * np.random.uniform(0.45, 1.6), 0, 255)
     aug_img = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
-    # 亮度/对比(轻度)
-    alpha = np.random.uniform(0.9, 1.1)
-    beta = np.random.randint(-10, 10)
+    # 2) 亮度/对比 (线性)
+    alpha = np.random.uniform(0.65, 1.35)
+    beta = np.random.uniform(-45, 45)
     aug_img = np.clip(alpha * aug_img.astype(np.float32) + beta, 0, 255).astype(np.uint8)
+
+    # 3) gamma (幂律, 模拟曝光/背光): 亮度非线性重映射
+    if np.random.random() < 0.6:
+        gamma = np.random.uniform(0.45, 2.2)
+        lut = np.clip((np.arange(256) / 255.0) ** (1.0 / gamma) * 255, 0, 255).astype(np.uint8)
+        aug_img = cv2.LUT(aug_img, lut)
+
+    # 4) CLAHE (局部对比均衡, 模拟强光+阴影并存): 只对亮度通道做
+    if np.random.random() < 0.5:
+        ycrcb = cv2.cvtColor(aug_img, cv2.COLOR_BGR2YCrCb)
+        clahe = cv2.createCLAHE(clipLimit=np.random.uniform(1.5, 4.0), tileGridSize=(8, 8))
+        ycrcb[:, :, 0] = clahe.apply(ycrcb[:, :, 0])
+        aug_img = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
+
+    # 5) 色偏/色温 (暖/冷 LED 等): R/B 通道独立缩放
+    if np.random.random() < 0.5:
+        scale_r = np.random.uniform(0.85, 1.2)
+        scale_b = np.random.uniform(0.85, 1.2)
+        b, g, r = cv2.split(aug_img)
+        r = np.clip(r.astype(np.float32) * scale_r, 0, 255)
+        b = np.clip(b.astype(np.float32) * scale_b, 0, 255)
+        aug_img = cv2.merge([b.astype(np.uint8), g, r.astype(np.uint8)])
+
+    # 6) 通道丢失/灰度混合 (对色偏/单色鲁棒)
+    if np.random.random() < 0.2:
+        gray = cv2.cvtColor(aug_img, cv2.COLOR_BGR2GRAY)
+        t = np.random.uniform(0.5, 1.0)
+        aug_img = cv2.addWeighted(aug_img, t, cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR), 1.0 - t, 0)
 
     # 轻模糊 / 轻噪声 (各 10%)
     if np.random.random() < 0.1:

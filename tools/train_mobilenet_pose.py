@@ -35,8 +35,8 @@ HP = dict(
     warmup_epochs=3, cos_lr=True, close_mosaic=10,
     # 损失权重 (查准优先, K=2)
     kobj=5.0, cls=1.0, box=5.0, pose=15.0,
-    # 在线增强: 离线 light3 已覆盖几何/HSV, 在线保留轻档 (fliplr=0 货架不对称)
-    hsv_h=0.01, hsv_s=0.2, hsv_v=0.15,
+    # 在线增强: 离线已覆盖几何+强光度, 在线保留中档 HSV(亮度/饱和为主) (fliplr=0 货架不对称)
+    hsv_h=0.02, hsv_s=0.6, hsv_v=0.5,
     degrees=3.0, translate=0.03, scale=0.15, shear=0.5,
     fliplr=0.0, mosaic=0.3,
     amp=True,  # fp16 混合精度直接训
